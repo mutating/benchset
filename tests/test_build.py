@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple
 
 import pytest
 
-import _benchset_build as backend
+from scripts import build_backend as backend
 
 TARGET = 'aarch64-apple-darwin'
 

@@ -11,7 +11,7 @@ from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
 
-from _benchset_build import rust_environment
+from scripts.build_backend import rust_environment
 
 ROOT = Path(__file__).parent.resolve()
 
