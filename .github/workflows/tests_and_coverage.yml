@@ -1,0 +1,161 @@
+name: Tests
+
+on:
+  push
+
+jobs:
+  build:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-15-intel, ubuntu-latest, windows-latest]
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14', '3.14t', '3.15']
+        include:
+          - os: macos-15
+            python-version: '3.13'
+          - os: macos-15
+            python-version: '3.14t'
+          - os: macos-15
+            python-version: '3.15'
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+          python-version: ${{ matrix.python-version }}
+          # Prerelease CPython ABIs can change; keep 3.15 aligned with current wheels.
+          allow-prereleases: true
+          check-latest: ${{ matrix.python-version == '3.15' }}
+
+    - uses: dtolnay/rust-toolchain@1.94.1
+
+    - name: Test Rust core
+      run: cargo test -- --test-threads=1
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+
+    - name: Install dependencies
+      shell: bash
+      run: uv pip install --system -r requirements_dev.txt
+
+    - name: Install the library
+      shell: bash
+      run: uv pip install --system .
+
+    - name: Build native library for source tests
+      run: python scripts/build_native.py
+
+    - name: Print all libs
+      shell: bash
+      run: uv pip list --system
+
+    - name: Run tests and show coverage on the command line
+      shell: bash
+      run: |
+        pth_file="$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/benchset_coverage_process_startup.pth"
+        printf "import os; os.getenv('COVERAGE_PROCESS_START') and __import__('coverage').process_startup()\n" > "$pth_file"
+        coverage erase
+        COVERAGE_PROCESS_START="$PWD/pyproject.toml" coverage run -m pytest -n auto --cache-clear --assert=plain
+        coverage combine
+        coverage report -m --fail-under=100
+        coverage xml
+
+    - name: Upload coverage to Coveralls
+      if: runner.os == 'Linux'
+      env:
+        COVERALLS_REPO_TOKEN: ${{secrets.COVERALLS_REPO_TOKEN}}
+      uses: coverallsapp/github-action@v2
+      with:
+        format: cobertura
+        file: coverage.xml
+      continue-on-error: true
+
+    - name: Run tests and show the branch coverage on the command line
+      shell: bash
+      run: |
+        pth_file="$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/benchset_coverage_process_startup.pth"
+        printf "import os; os.getenv('COVERAGE_PROCESS_START') and __import__('coverage').process_startup()\n" > "$pth_file"
+        coverage erase
+        BENCHSET_COVERAGE_BRANCH=true COVERAGE_PROCESS_START="$PWD/pyproject.toml" coverage run -m pytest -n auto --cache-clear --assert=plain
+        coverage combine
+        coverage report -m --fail-under=100
+
+  rust_coverage:
+    name: Rust coverage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: llvm-tools-preview
+      - name: Enforce 100% Rust source coverage
+        run: python scripts/check_native_coverage.py rust
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-coverage-${{ matrix.os }}
+          path: |
+            target/coverage/rust/*.json
+            target/coverage/rust/*.txt
+          if-no-files-found: warn
+
+  swift_coverage:
+    name: Swift coverage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Build universal native library
+        run: python scripts/package_native.py --target aarch64-apple-darwin --apple
+      - name: Check the library deployment target
+        run: swift build
+      - name: Enforce 100% Swift source coverage
+        run: python scripts/check_native_coverage.py swift
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swift-coverage-${{ matrix.os }}
+          path: |
+            target/coverage/swift/*.json
+            target/coverage/swift/*.txt
+          if-no-files-found: warn
+
+  source_install:
+    name: Source install without Cargo (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/benchset/rust
+            ~/Library/Caches/benchset/rust
+            ~/AppData/Local/benchset/rust
+          key: benchset-bootstrap-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install into a fresh venv and run the installed CLI
+        run: python scripts/check_source_install.py
