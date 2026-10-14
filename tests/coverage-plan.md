@@ -31,7 +31,7 @@ than relying on Python tests to exercise uninstrumented Rust or Swift code.
 | Swift callback ownership | Null progress/context ignored, context/closure captures alive during native call and released afterwards | Swift `nullableCallbacksAndContextLifetime` with private C-function table |
 | Suite | Single then multi; parameters/callback forwarded; stops after failure/cancel on either step | Python suite tests |
 | CLI parameters | Help/version/unknown options, missing values, invalid floats/names, selected benchmark/default suite, repeated parser calls, original argv restored | Python CLI tests |
-| CLI completion | 0/stdout on success; 1/stderr on failure; 130/stderr on cancellation/interruption; stop suite; repeated Ctrl+C; interrupted completion; terminal progress/output failure; semantic rendering of optional fields/samples | Python CLI tests |
+| CLI completion | 0/stdout on success; 1/stderr on failure; 130/stderr on cancellation/interruption; stop suite; repeated Ctrl+C; interruption before/after worker start/join; signal handler restored on exit/startup failure; calls outside main thread; interrupted completion; terminal progress/output failure; semantic rendering of optional fields/samples | Python CLI tests |
 
 ## Source installation
 

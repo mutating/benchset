@@ -1,5 +1,6 @@
 import ctypes
 import io
+import signal
 from threading import Event, Thread
 from typing import List, Optional
 
@@ -114,3 +115,81 @@ def test_cli_interrupt_without_console_signals(monkeypatch: pytest.MonkeyPatch, 
     captured = capsys.readouterr()
     assert not captured.out
     assert 'cancelled' in captured.err
+
+
+@pytest.mark.parametrize('boundary', ['before_start', 'after_start', 'before_join', 'after_join'])
+def test_cli_interrupt_at_worker_boundaries(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], boundary: str,
+) -> None:
+    runner = BenchmarkRunner()
+    workers: List[Thread] = []
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def interrupt() -> None:
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+
+    class SignallingThread(Thread):
+        def start(self) -> None:
+            workers.append(self)
+            if boundary == 'before_start':
+                interrupt()
+            super().start()
+            if boundary == 'after_start':
+                interrupt()
+
+        def join(self, timeout: Optional[float] = None) -> None:
+            if boundary == 'before_join':
+                interrupt()
+            super().join(timeout)
+            if boundary == 'after_join':
+                interrupt()
+
+    monkeypatch.setattr(cli, 'Thread', SignallingThread)
+    monkeypatch.setattr(cli, 'BenchmarkRunner', lambda: runner)
+    try:
+        try:
+            status = cli.main(['--warmup', '0', '--duration', '0.05'])
+        except KeyboardInterrupt:
+            pytest.fail('SIGINT escaped the CLI during ' + boundary)
+        assert status == 130
+    finally:
+        runner.cancel()
+        for worker in workers:
+            if worker.ident is not None:
+                Thread.join(worker, 5)
+    assert workers
+    assert all(not worker.is_alive() for worker in workers)
+    assert len(workers) == 1  # An interrupted suite must not start multi_core.
+    assert signal.getsignal(signal.SIGINT) is original_handler
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert 'single_core' in captured.err
+
+
+def test_cli_restores_signal_handler_after_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    class BrokenThread(Thread):
+        def start(self) -> None:
+            raise RuntimeError('cannot start CLI worker')
+
+    monkeypatch.setattr(cli, 'Thread', BrokenThread)
+    with pytest.raises(RuntimeError, match='cannot start CLI worker'):
+        cli.main(['--bench', 'single_core'])
+    assert signal.getsignal(signal.SIGINT) is original_handler
+
+
+def test_cli_can_run_outside_main_thread(capsys: pytest.CaptureFixture[str]) -> None:
+    results: List[int] = []
+    worker = Thread(target=lambda: results.append(cli.main([
+        '--bench', 'single_core', '--warmup', '0', '--duration', '0.02',
+    ])))
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert results == [0]
+    captured = capsys.readouterr()
+    assert 'completed' in captured.out
+    assert not captured.err

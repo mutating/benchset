@@ -1,8 +1,10 @@
 """CLI settings are read by skelet, without environment/config sources."""
 
 import math
+import signal
 import sys
-from threading import Event, Thread
+from threading import Event, Thread, current_thread, main_thread
+from types import FrameType
 from typing import List, Optional, TextIO
 
 from skelet import Field, FixedCLISource, Storage
@@ -128,17 +130,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                 completion.set()
 
         worker = Thread(target=execute, name='benchset-cli')
-        worker.start()
         interrupted = False
-        while not done.is_set():
-            try:
-                done.wait(0.05)
-            except KeyboardInterrupt:
-                interrupted = True
-                runner.cancel()
-            if interrupted:
-                runner.cancel()
-        worker.join()
+
+        def interrupt(_signum: int, _frame: Optional[FrameType]) -> None:
+            nonlocal interrupted
+            # Raising during Thread.start()/join() can leave the worker running.
+            # Set a flag only; cancellation happens outside the signal handler.
+            interrupted = True
+
+        handles_signals = current_thread() is main_thread()
+        previous_handler = signal.getsignal(signal.SIGINT)
+        if handles_signals:
+            signal.signal(signal.SIGINT, interrupt)
+        try:
+            worker.start()
+            while not done.is_set():
+                try:
+                    done.wait(0.05)
+                except KeyboardInterrupt:
+                    interrupted = True
+                if interrupted:
+                    runner.cancel()
+            worker.join()
+        finally:
+            if handles_signals:
+                signal.signal(signal.SIGINT, previous_handler)
         if sys.stdout.isatty():
             sys.stdout.write('\r' + ' ' * 80 + '\r')
         result = results[0]
