@@ -102,7 +102,10 @@ fn real_runs_account_for_work_and_progress_on_caller() {
             );
         }
         assert!(result.variation_percent.is_none());
-        assert_eq!(events[0].phase, Phase::Warmup);
+        assert!(matches!(
+            events[0].phase,
+            Phase::Warmup | Phase::Measurement
+        ));
         assert!(events.iter().any(|p| p.phase == Phase::Measurement));
         let final_event = events.last().unwrap();
         assert_eq!(final_event.phase, Phase::Completed);
@@ -183,7 +186,11 @@ fn sticky_precancel_and_cancel_in_each_phase() {
         let result = run(
             Benchmark::MultiCore,
             Options {
-                warmup: Duration::from_millis(30),
+                warmup: if phase == Phase::Warmup {
+                    Duration::from_secs(10)
+                } else {
+                    Duration::ZERO
+                },
                 measurement: Duration::from_millis(100),
             },
             &token,
@@ -268,7 +275,11 @@ fn callback_panics_release_workers_and_active_guard() {
             run(
                 Benchmark::MultiCore,
                 Options {
-                    warmup: Duration::from_millis(20),
+                    warmup: if phase == Phase::Warmup {
+                        Duration::from_secs(10)
+                    } else {
+                        Duration::ZERO
+                    },
                     measurement: Duration::from_millis(30),
                 },
                 &Cancellation::default(),

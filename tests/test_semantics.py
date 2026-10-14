@@ -69,8 +69,12 @@ def test_native_duration_limits_preserve_requested_diagnostics(warmup: float, me
 @pytest.mark.parametrize('phase', ['warmup', 'measurement', 'completed'])
 @pytest.mark.parametrize('error_type', [ValueError, KeyboardInterrupt, SystemExit, GeneratorExit])
 def test_callback_base_exceptions_stop_notifications_and_allow_reuse(
-    phase: str, error_type: Type[BaseException],
+    monkeypatch: pytest.MonkeyPatch, phase: str, error_type: Type[BaseException],
 ) -> None:
+    native = Native()
+    library = CallbackLibrary()
+    monkeypatch.setattr(native, 'lib', library)
+    monkeypatch.setattr(api, 'Native', lambda: native)
     runner = BenchmarkRunner()
     events: List[Progress] = []
     caller = get_ident()
@@ -87,10 +91,14 @@ def test_callback_base_exceptions_stop_notifications_and_allow_reuse(
     assert result.reason == f'progress callback failed: {error_type.__name__}: callback boundary'
     assert events[-1].phase == phase
     assert sum(event.phase == phase for event in events) == 1
+    assert library.cancelled == 1
+    assert library.freed == [1]
     if phase == 'completed':
         assert result.iterations > 0
         assert result.samples
     assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.02).success
+    assert library.created == library.freed == [1, 2]
+    assert library.cancelled == 1
 
 
 def test_reentrant_runner_global_busy_and_idle_cancellation() -> None:
@@ -204,11 +212,12 @@ class ResultLibrary:
         self.reason = reason
         self.config: Optional[Config] = None
         self.cancelled = 0
+        self.phases = [1, 2, 3, 4, 5]
 
     def benchset_run(self, _handle: int, config: Any, callback: Callable[..., None], _user: object) -> int:
         raw = ctypes.cast(config, ctypes.POINTER(Config)).contents
         self.config = Config.from_buffer_copy(raw)
-        for phase in [1, 2, 3, 4, 5]:
+        for phase in self.phases:
             progress = CProgress(phase, 2**32 - 1, 0.375, 1.25, 2.5, 2**64 - 1)
             callback(ctypes.pointer(progress), None)
         return self.value.status
@@ -224,6 +233,32 @@ class ResultLibrary:
 
     def benchset_reason(self, _handle: int) -> Optional[bytes]:
         return self.reason
+
+
+class CallbackLibrary(ResultLibrary):
+    """Drive actual ctypes callbacks without relying on a timed warmup window."""
+
+    def __init__(self) -> None:
+        super().__init__(status=0, reason=None, has_variation=0)
+        # Continue notifying after cancellation to exercise Python suppression.
+        self.phases = [1, 1, 2, 2, 3, 3, 4, 5]
+        self.created: List[int] = []
+        self.freed: List[int] = []
+
+    def benchset_create(self) -> int:
+        handle = len(self.created) + 1
+        self.created.append(handle)
+        return handle
+
+    def benchset_cancel(self, handle: int) -> None:
+        assert handle in self.created
+        assert handle not in self.freed
+        self.cancelled += 1
+
+    def benchset_free(self, handle: int) -> None:
+        assert handle in self.created
+        assert handle not in self.freed
+        self.freed.append(handle)
 
 
 @pytest.mark.parametrize('status', [0, 1, 2])

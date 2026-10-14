@@ -30,7 +30,7 @@ def test_measurement_and_samples() -> None:
     assert len(result.samples) >= 2
     assert result.variation_percent is not None
     assert result.unstable == (result.variation_percent > 10)
-    assert progress[0].phase == 'warmup'
+    assert progress[0].phase in ('warmup', 'measurement')
     assert any(item.phase == 'measurement' for item in progress)
     assert progress[-1].phase == 'completed'
     assert progress[-1].fraction == 1
@@ -57,7 +57,10 @@ def test_cancel_and_reuse(phase: str) -> None:
         if value.phase == phase:
             runner.cancel()
 
-    result = runner.run('single_core', warmup_seconds=0.1, measurement_seconds=0.2, on_progress=progress)
+    # Start in the phase under test; cancellation does not wait for a short
+    # warmup-to-measurement transition that the scheduler can skip observing.
+    warmup = 10 if phase == 'warmup' else 0
+    result = runner.run('single_core', warmup_seconds=warmup, measurement_seconds=0.2, on_progress=progress)
     assert result.status == 'cancelled'
     assert result.score is None
     assert result.reason == 'cancelled'
@@ -66,14 +69,17 @@ def test_cancel_and_reuse(phase: str) -> None:
     assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.03).success
 
 
-def test_callback_exception_does_not_cross_c() -> None:
+@pytest.mark.parametrize('warmup', [0, 1])
+def test_callback_exception_does_not_cross_c(warmup: float) -> None:
     def broken(_progress: Progress) -> None:
         raise ValueError('intentional callback error')
-    result = run('single_core', warmup_seconds=1, measurement_seconds=1, on_progress=broken)
+    runner = BenchmarkRunner()
+    result = runner.run('single_core', warmup_seconds=warmup, measurement_seconds=1, on_progress=broken)
     assert result.status == 'failed'
     assert result.score is None
     assert result.reason is not None
     assert 'intentional callback error' in result.reason
+    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.03).success
 
 
 def test_busy_and_external_cancellation() -> None:

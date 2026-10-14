@@ -124,7 +124,7 @@ struct BenchsetTests {
             #expect(result.reason == nil)
             #expect(result.variationPercent == nil)
             #expect(!result.unstable)
-            #expect(events.first?.phase == 1)
+            #expect(events.first?.phase == 1 || events.first?.phase == 2)
             #expect(events.contains { $0.phase == 2 })
             #expect(events.last?.phase == 3)
             #expect(events.last?.fraction == 1)
@@ -139,7 +139,7 @@ struct BenchsetTests {
             let runner = BenchmarkRunner()
             runner.cancel()
             var events: [Benchset.Progress] = []
-            let result = try runner.run(.multiCore, warmupSeconds: 0.04, measurementSeconds: 0.1) { progress in
+            let result = try runner.run(.multiCore, warmupSeconds: phase == 1 ? 10 : 0, measurementSeconds: 0.1) { progress in
                 events.append(progress)
                 if progress.phase == phase { runner.cancel(); runner.cancel() }
             }

@@ -84,7 +84,9 @@ with ThreadPoolExecutor(max_workers=1) as pool:
 ```
 
 Callbacks execute on the thread calling `run`, approximately ten times per
-second and on phase transitions. They receive the benchmark name, phase,
+second and on observed phase transitions. A very short phase can finish before
+the coordinator reports it, so callback sequences may omit that phase.
+Callbacks receive the benchmark name, phase,
 worker count, overall fraction, phase elapsed/target time and completed
 iterations in that phase. Dispatch UI updates to the UI thread yourself and
 return promptly. A Python callback exception cancels the workload and produces
