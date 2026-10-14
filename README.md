@@ -14,8 +14,8 @@ Higher is faster. There is no reference machine or score normalization.
 ```sh
 pip install benchset
 benchset
-benchset --banch single_core
-benchset --banch multi_core --warmup 120 --duration 60
+benchset --bench single_core
+benchset --bench multi_core --warmup 120 --duration 60
 python -m benchset --warmup 0 --duration 1
 ```
 
@@ -26,13 +26,13 @@ and a platform linker/SDK.
 
 | CLI option | Default | Meaning |
 |---|---:|---|
-| `--banch` | all | `single_core` or `multi_core`; omitted runs both in this order |
+| `--bench` | all | `single_core` or `multi_core`; omitted runs both in this order |
 | `--warmup` | 120 | Seconds of continuous workload excluded from the score; zero is allowed |
 | `--duration` | 60 | Seconds of measurement after warmup; must be positive |
 | `--help` | | Show syntax |
 | `--version` | | Show the library/benchmark version |
 
-`--banch` is the public spelling of the selector. CLI settings are read through
+`--bench` is the public spelling of the selector. CLI settings are read through
 `skelet`; configuration files and environment settings are not used.
 
 A default full suite takes approximately six minutes. Each benchmark has its

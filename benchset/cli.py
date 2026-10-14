@@ -19,28 +19,28 @@ from benchset.models import (
 
 
 class Settings(Storage):
-    banch: str = Field('all')
+    bench: str = Field('all')
     warmup: float = Field(DEFAULT_WARMUP_SECONDS)
     duration: float = Field(DEFAULT_MEASUREMENT_SECONDS)
 
 
 def settings(argv: List[str]) -> Settings:
-    source: FixedCLISource[object] = FixedCLISource(named_arguments=['banch', 'warmup', 'duration'])
+    source: FixedCLISource[object] = FixedCLISource(named_arguments=['bench', 'warmup', 'duration'])
     source.parser.prog = 'benchset'
     source.parser.description = 'Sustained scalar CPU throughput (iterations/s).'
     source.parser.add_argument('-h', '--help', action='help')
     source.parser.add_argument('--version', action='version', version=__version__)
     # Validate syntax once: FixedCLISource intentionally masks argparse failures.
     parsed = source.parser.parse_args(argv)
-    for key in ('banch', 'warmup', 'duration'):
+    for key in ('bench', 'warmup', 'duration'):
         if getattr(parsed, key) is None:
             source.parser.error('--' + key + ' requires a value')
     previous = sys.argv
     try:
         sys.argv = ['benchset', *argv]
         result = Settings(_sources=[source])
-        if result.banch not in ('all', *BENCHMARKS):
-            source.parser.error('--banch must be single_core or multi_core')
+        if result.bench not in ('all', *BENCHMARKS):
+            source.parser.error('--bench must be single_core or multi_core')
         if not math.isfinite(result.warmup) or result.warmup < 0:
             source.parser.error('--warmup must be finite and nonnegative')
         if not math.isfinite(result.duration) or result.duration <= 0:
@@ -94,7 +94,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         config = settings(list(sys.argv[1:] if argv is None else argv))
     except SystemExit as exit_status:
         return int(exit_status.code or 0)
-    names = BENCHMARKS if config.banch == 'all' else (config.banch,)
+    names = BENCHMARKS if config.bench == 'all' else (config.bench,)
     for name in names:
         runner = BenchmarkRunner()
         results: List[BenchmarkResult] = []

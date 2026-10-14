@@ -131,7 +131,7 @@ def test_native_invalid_abi_and_pre_cancel() -> None:
 
 @pytest.mark.parametrize(('arguments', 'code'), [
     (['--help'], 0), (['--version'], 0), (['--unknown'], 2),
-    (['--banch'], 2), (['--banch', 'missing'], 2),
+    (['--bench'], 2), (['--bench', 'missing'], 2),
     (['--duration', '0'], 2), (['--duration', 'nan'], 2),
     (['--warmup', '-1'], 2), (['--warmup', 'oops'], 2),
 ])

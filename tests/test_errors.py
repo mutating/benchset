@@ -81,7 +81,7 @@ class Terminal(io.StringIO):
 def test_terminal_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     terminal = Terminal()
     monkeypatch.setattr(cli.sys, 'stdout', terminal)
-    assert cli.main(['--banch', 'single_core', '--warmup', '0', '--duration', '0.02']) == 0
+    assert cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '0.02']) == 0
     assert 'measurement' in terminal.getvalue()
     assert '100.0%' in terminal.getvalue()
 
@@ -90,7 +90,7 @@ def test_background_failure_reaches_stderr(monkeypatch: pytest.MonkeyPatch, caps
     def broken(*_arguments: object, **_keywords: object) -> BenchmarkResult:
         raise RuntimeError('background failure')
     monkeypatch.setattr(BenchmarkRunner, 'run', broken)
-    assert cli.main(['--banch', 'single_core', '--warmup', '0', '--duration', '0.02']) == 1
+    assert cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '0.02']) == 1
     captured = capsys.readouterr()
     assert not captured.out
     assert 'background failure' in captured.err
@@ -110,7 +110,7 @@ class InterruptedEvent(Event):
 
 def test_cli_interrupt_without_console_signals(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cli, 'Event', InterruptedEvent)
-    assert cli.main(['--banch', 'single_core', '--warmup', '20', '--duration', '1']) == 130
+    assert cli.main(['--bench', 'single_core', '--warmup', '20', '--duration', '1']) == 130
     captured = capsys.readouterr()
     assert not captured.out
     assert 'cancelled' in captured.err

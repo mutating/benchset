@@ -316,10 +316,10 @@ def test_cli_invalid_settings_restore_argv(arguments: List[str]) -> None:
 
 
 def test_cli_settings_repeated_calls_and_system_argv(monkeypatch: pytest.MonkeyPatch) -> None:
-    original = ['benchset', '--banch', 'multi_core', '--warmup', '0', '--duration', '0.1']
+    original = ['benchset', '--bench', 'multi_core', '--warmup', '0', '--duration', '0.1']
     monkeypatch.setattr(sys, 'argv', original)
-    assert cli.settings(original[1:]).banch == 'multi_core'
-    assert cli.settings([]).banch == 'all'
+    assert cli.settings(original[1:]).bench == 'multi_core'
+    assert cli.settings([]).bench == 'all'
     assert sys.argv is original
     backend = ManagedNative()
     monkeypatch.setattr(api, 'Native', lambda: backend)
@@ -382,7 +382,7 @@ def test_cli_selected_benchmark_runs_once(monkeypatch: pytest.MonkeyPatch, bench
         names.append(name)
         return BenchmarkResult(name, status='completed', score=1)
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
-    assert cli.main(['--banch', benchmark, '--warmup', '0', '--duration', '0.1']) == 0
+    assert cli.main(['--bench', benchmark, '--warmup', '0', '--duration', '0.1']) == 0
     assert names == [benchmark]
 
 
@@ -409,7 +409,7 @@ def test_cli_repeated_interrupt_has_priority_over_completed_result(
     def execute(_self: BenchmarkRunner, name: str, **_kwargs: object) -> BenchmarkResult:
         return BenchmarkResult(name, status='completed', score=1)
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
-    assert cli.main(['--banch', 'single_core']) == 130
+    assert cli.main(['--bench', 'single_core']) == 130
     captured = capsys.readouterr()
     assert not captured.out
     assert 'completed' in captured.err
@@ -435,7 +435,7 @@ def test_cli_output_callback_error_is_reported_as_failure(
 ) -> None:
     stream = BrokenProgressOutput()
     monkeypatch.setattr(cli.sys, 'stdout', stream)
-    assert cli.main(['--banch', 'single_core', '--warmup', '1', '--duration', '1']) == 1
+    assert cli.main(['--bench', 'single_core', '--warmup', '1', '--duration', '1']) == 1
     assert stream.failed_once
     assert 'terminal disconnected' in capsys.readouterr().err
 
