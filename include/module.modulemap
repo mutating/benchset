@@ -1,0 +1,4 @@
+module CBenchset {
+    header "benchset.h"
+    export *
+}

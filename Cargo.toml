@@ -1,0 +1,25 @@
+[package]
+name = "benchset"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.74"
+description = "Embeddable sustained scalar CPU benchmarks with a C ABI"
+license = "MIT"
+repository = "https://github.com/mutating/benchset"
+readme = "README.md"
+keywords = ["benchmark", "cpu", "ffi", "performance"]
+categories = ["development-tools::profiling"]
+include = ["/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/native/**", "/include/**", "/examples/native/**"]
+
+[lib]
+path = "native/src/lib.rs"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[[example]]
+name = "rust"
+path = "examples/native/rust.rs"

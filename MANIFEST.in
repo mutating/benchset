@@ -1,0 +1,11 @@
+include Cargo.toml Cargo.lock rust-toolchain.toml LICENSE README.md
+recursive-include native *.rs
+recursive-include include *.h *.modulemap
+recursive-include scripts *.py
+recursive-include examples *.c *.rs *.swift
+include Package.swift
+recursive-include Sources *.swift
+recursive-include tests *.swift
+prune target
+prune Artifacts
+prune benchset/_native

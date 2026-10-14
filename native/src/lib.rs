@@ -1,0 +1,555 @@
+//! Sustained scalar CPU throughput, available through Rust and a C ABI.
+mod ffi;
+mod kernel;
+
+use kernel::Kernel;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, OnceLock};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const DEFAULT_WARMUP_SECONDS: f64 = 120.0;
+pub const DEFAULT_MEASUREMENT_SECONDS: f64 = 60.0;
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Benchmark {
+    SingleCore = 1,
+    MultiCore = 2,
+}
+
+impl Benchmark {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SingleCore => "single_core",
+            Self::MultiCore => "multi_core",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub warmup: Duration,
+    pub measurement: Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            warmup: Duration::from_secs(120),
+            measurement: Duration::from_secs(60),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct Cancellation(Arc<AtomicBool>);
+
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Phase {
+    Warmup = 1,
+    Measurement = 2,
+    Completed = 3,
+    Cancelled = 4,
+    Failed = 5,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Progress {
+    pub phase: Phase,
+    pub workers: u32,
+    pub fraction: f64,
+    pub phase_elapsed_seconds: f64,
+    pub phase_duration_seconds: f64,
+    pub iterations: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Status {
+    Completed = 0,
+    Cancelled = 1,
+    Failed = 2,
+}
+
+#[derive(Clone, Debug)]
+pub struct Sample {
+    pub elapsed_seconds: f64,
+    pub duration_seconds: f64,
+    pub iterations: u64,
+    pub iterations_per_second: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct BenchmarkResult {
+    pub benchmark: Benchmark,
+    pub version: &'static str,
+    pub status: Status,
+    pub reason: String,
+    pub score: Option<f64>,
+    pub workers: u32,
+    pub warmup_seconds: f64,
+    pub measurement_seconds: f64,
+    pub elapsed_seconds: f64,
+    pub iterations: u64,
+    pub checksum: u64,
+    pub samples: Vec<Sample>,
+    pub variation_percent: Option<f64>,
+    pub unstable: bool,
+}
+
+impl BenchmarkResult {
+    pub(crate) fn failed(benchmark: Benchmark, options: Options, reason: String) -> Self {
+        Self {
+            benchmark,
+            version: VERSION,
+            status: Status::Failed,
+            reason,
+            score: None,
+            workers: 0,
+            warmup_seconds: options.warmup.as_secs_f64(),
+            measurement_seconds: options.measurement.as_secs_f64(),
+            elapsed_seconds: 0.0,
+            iterations: 0,
+            checksum: 0,
+            samples: Vec::new(),
+            variation_percent: None,
+            unstable: false,
+        }
+    }
+}
+
+struct ActiveGuard;
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+#[repr(align(64))]
+#[derive(Default)]
+struct Counters {
+    warmup: AtomicU64,
+    measurement: AtomicU64,
+    finish_ns: AtomicU64,
+    checksum: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Timing {
+    start: Instant,
+    warm_end: Instant,
+    end: Instant,
+}
+
+struct Workers {
+    handles: Vec<JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Workers {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Run one benchmark. Callbacks run on the calling thread, at most about 10 Hz
+/// plus phase transitions. Cancellation can be requested from any thread.
+/// A cancellation token is sticky; create a fresh token for a new run.
+/// Only one run is allowed at a time in this loaded instance of the library.
+pub fn run(
+    benchmark: Benchmark,
+    options: Options,
+    cancellation: &Cancellation,
+    mut on_progress: impl FnMut(Progress),
+) -> BenchmarkResult {
+    run_with(
+        benchmark,
+        options,
+        cancellation,
+        &mut on_progress,
+        Arc::new(System),
+    )
+}
+
+// Initialization dependencies are replaceable in unit tests. The benchmark's
+// timed kernel and production scheduling remain the same.
+trait Runtime: Send + Sync + 'static {
+    fn available_cpus(&self) -> std::io::Result<usize>;
+    fn spawn(
+        &self,
+        index: usize,
+        task: Box<dyn FnOnce() + Send>,
+    ) -> std::io::Result<JoinHandle<()>>;
+    fn kernel(&self, index: usize) -> Result<Kernel, String>;
+}
+
+#[derive(Clone)]
+struct System;
+impl Runtime for System {
+    fn available_cpus(&self) -> std::io::Result<usize> {
+        thread::available_parallelism().map(|count| count.get())
+    }
+    fn spawn(
+        &self,
+        index: usize,
+        task: Box<dyn FnOnce() + Send>,
+    ) -> std::io::Result<JoinHandle<()>> {
+        thread::Builder::new()
+            .name(format!("benchset-{index}"))
+            .spawn(task)
+    }
+    fn kernel(&self, index: usize) -> Result<Kernel, String> {
+        Kernel::new(index)
+    }
+}
+
+fn run_with(
+    benchmark: Benchmark,
+    options: Options,
+    cancellation: &Cancellation,
+    on_progress: &mut dyn FnMut(Progress),
+    runtime: Arc<dyn Runtime>,
+) -> BenchmarkResult {
+    let mut result = BenchmarkResult::failed(benchmark, options, String::new());
+    if options.measurement.is_zero() {
+        result.reason = "measurement duration must be positive".into();
+        return result;
+    }
+    if ACTIVE
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        result.reason = "another benchmark is already running".into();
+        return result;
+    }
+    let _active = ActiveGuard;
+    let count = match benchmark {
+        Benchmark::SingleCore => 1,
+        Benchmark::MultiCore => match runtime.available_cpus() {
+            Ok(count) => count,
+            Err(error) => {
+                result.reason = format!("cannot determine available CPUs: {error}");
+                return result;
+            }
+        },
+    };
+    result.workers = count as u32;
+    if cancellation.is_cancelled() {
+        result.status = Status::Cancelled;
+        result.reason = "cancelled before starting".into();
+        return result;
+    }
+
+    let counters: Vec<_> = (0..count).map(|_| Arc::new(Counters::default())).collect();
+    let timing = Arc::new(OnceLock::<Timing>::new());
+    // A channel releases initialized workers. Unlike a barrier it also permits
+    // cleanup when thread creation or initialization fails partway through.
+    let start_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut workers = Workers {
+        handles: Vec::new(),
+        stop: stop.clone(),
+    };
+    let (ready_tx, ready_rx) = mpsc::channel();
+    for (index, counter) in counters.iter().enumerate() {
+        let counter = counter.clone();
+        let token = cancellation.clone();
+        let worker_stop = stop.clone();
+        let timing = timing.clone();
+        let gate = start_gate.clone();
+        let ready = ready_tx.clone();
+        let worker_runtime = runtime.clone();
+        let handle = runtime.spawn(
+            index,
+            Box::new(move || {
+                let kernel = worker_runtime.kernel(index);
+                let _ = ready.send(kernel.as_ref().map(|_| ()).map_err(Clone::clone));
+                drop(ready);
+                let mut kernel = match kernel {
+                    Ok(kernel) => kernel,
+                    Err(_) => return,
+                };
+                let (lock, cv) = &*gate;
+                let mut started = lock.lock().unwrap();
+                while !*started {
+                    started = cv.wait(started).unwrap();
+                }
+                drop(started);
+                if worker_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let times = *timing.get().unwrap();
+                let mut checksum = 0;
+                loop {
+                    let now = Instant::now();
+                    if worker_stop.load(Ordering::Relaxed)
+                        || token.is_cancelled()
+                        || now >= times.end
+                    {
+                        break;
+                    }
+                    let warmup = now < times.warm_end;
+                    // Publish once per eight iterations, never contend on a shared counter.
+                    for _ in 0..8 {
+                        checksum = kernel.step();
+                    }
+                    if warmup {
+                        counter.warmup.fetch_add(8, Ordering::Relaxed);
+                    } else {
+                        counter.measurement.fetch_add(8, Ordering::Relaxed);
+                    }
+                }
+                let end = Instant::now();
+                let elapsed = end.saturating_duration_since(times.warm_end).as_nanos();
+                counter
+                    .finish_ns
+                    .store(elapsed.min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
+                counter.checksum.store(checksum, Ordering::Relaxed);
+            }),
+        );
+        match handle {
+            Ok(handle) => workers.handles.push(handle),
+            Err(error) => {
+                stop.store(true, Ordering::Relaxed);
+                release(&start_gate);
+                result.reason = format!("cannot start worker: {error}");
+                return result;
+            }
+        }
+    }
+    drop(ready_tx);
+    for _ in 0..count {
+        match ready_rx.recv() {
+            Ok(Ok(())) => (),
+            other => {
+                stop.store(true, Ordering::Relaxed);
+                release(&start_gate);
+                result.reason = format!("worker initialization failed: {other:?}");
+                return result;
+            }
+        }
+    }
+    let start = Instant::now();
+    let times = match start.checked_add(options.warmup).and_then(|warm_end| {
+        warm_end.checked_add(options.measurement).map(|end| Timing {
+            start,
+            warm_end,
+            end,
+        })
+    }) {
+        Some(times) => times,
+        None => {
+            stop.store(true, Ordering::Relaxed);
+            release(&start_gate);
+            result.reason = "requested duration exceeds the monotonic clock range".into();
+            return result;
+        }
+    };
+    timing
+        .set(times)
+        .expect("timing is initialized exactly once");
+    release(&start_gate);
+    let total_seconds = options.warmup.as_secs_f64() + options.measurement.as_secs_f64();
+    let mut last_progress = start.checked_sub(Duration::from_secs(1)).unwrap_or(start);
+    let mut last_phase = Phase::Failed;
+    let mut last_sample_elapsed = 0.0;
+    let mut last_sample_iterations = 0;
+    loop {
+        let now = Instant::now();
+        let phase = if now < times.warm_end {
+            Phase::Warmup
+        } else {
+            Phase::Measurement
+        };
+        let phase_start = if phase == Phase::Warmup {
+            times.start
+        } else {
+            times.warm_end
+        };
+        let phase_duration = if phase == Phase::Warmup {
+            options.warmup
+        } else {
+            options.measurement
+        };
+        let iterations = sum(&counters, phase == Phase::Warmup);
+        if phase == Phase::Measurement {
+            let elapsed = now.saturating_duration_since(times.warm_end).as_secs_f64();
+            if elapsed - last_sample_elapsed >= 1.0 && now < times.end {
+                append_sample(
+                    &mut result.samples,
+                    elapsed,
+                    iterations,
+                    &mut last_sample_elapsed,
+                    &mut last_sample_iterations,
+                );
+            }
+        }
+        if last_phase != phase || now.duration_since(last_progress) >= Duration::from_millis(100) {
+            on_progress(Progress {
+                phase,
+                workers: count as u32,
+                fraction: (now.duration_since(times.start).as_secs_f64() / total_seconds).min(1.0),
+                phase_elapsed_seconds: now
+                    .saturating_duration_since(phase_start)
+                    .as_secs_f64()
+                    .min(phase_duration.as_secs_f64()),
+                phase_duration_seconds: phase_duration.as_secs_f64(),
+                iterations,
+            });
+            last_phase = phase;
+            last_progress = now;
+        }
+        if cancellation.is_cancelled() || now >= times.end {
+            break;
+        }
+        thread::sleep(
+            Duration::from_millis(10).min(times.end.saturating_duration_since(Instant::now())),
+        );
+    }
+    stop.store(true, Ordering::Relaxed);
+    let mut panicked = false;
+    for handle in workers.handles.drain(..) {
+        panicked |= handle.join().is_err();
+    }
+    result.iterations = sum(&counters, false);
+    result.elapsed_seconds = counters
+        .iter()
+        .map(|c| c.finish_ns.load(Ordering::Relaxed))
+        .max()
+        .unwrap_or(0) as f64
+        / 1e9;
+    result.checksum = counters
+        .iter()
+        .fold(0, |value, c| value ^ c.checksum.load(Ordering::Relaxed));
+    finish_samples(&mut result);
+    finish_result(&mut result, panicked, cancellation.is_cancelled());
+    on_progress(Progress {
+        phase: match result.status {
+            Status::Completed => Phase::Completed,
+            Status::Cancelled => Phase::Cancelled,
+            Status::Failed => Phase::Failed,
+        },
+        workers: count as u32,
+        fraction: if result.status == Status::Completed {
+            1.0
+        } else {
+            (Instant::now().duration_since(start).as_secs_f64() / total_seconds).min(1.0)
+        },
+        phase_elapsed_seconds: result.elapsed_seconds,
+        phase_duration_seconds: options.measurement.as_secs_f64(),
+        iterations: result.iterations,
+    });
+    result
+}
+
+fn release(gate: &(std::sync::Mutex<bool>, std::sync::Condvar)) {
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+}
+
+fn sum(counters: &[Arc<Counters>], warmup: bool) -> u64 {
+    counters
+        .iter()
+        .map(|counter| {
+            if warmup {
+                counter.warmup.load(Ordering::Relaxed)
+            } else {
+                counter.measurement.load(Ordering::Relaxed)
+            }
+        })
+        .sum()
+}
+
+fn append_sample(
+    samples: &mut Vec<Sample>,
+    elapsed: f64,
+    iterations: u64,
+    last_elapsed: &mut f64,
+    last_iterations: &mut u64,
+) {
+    let duration = elapsed - *last_elapsed;
+    if duration <= 0.0 {
+        return;
+    }
+    let completed = iterations.saturating_sub(*last_iterations);
+    samples.push(Sample {
+        elapsed_seconds: elapsed,
+        duration_seconds: duration,
+        iterations: completed,
+        iterations_per_second: completed as f64 / duration,
+    });
+    *last_elapsed = elapsed;
+    *last_iterations = iterations;
+}
+
+fn finish_samples(result: &mut BenchmarkResult) {
+    // A worker can finish between the coordinator's clock read and counter
+    // snapshot during cancellation. Rebuild any tail extending past its actual
+    // finish time, keeping samples consistent with the final measurement.
+    while result
+        .samples
+        .last()
+        .is_some_and(|sample| sample.elapsed_seconds >= result.elapsed_seconds)
+    {
+        result.samples.pop();
+    }
+    let mut last_elapsed = result
+        .samples
+        .last()
+        .map_or(0.0, |sample| sample.elapsed_seconds);
+    let mut last_iterations = result.samples.iter().map(|sample| sample.iterations).sum();
+    append_sample(
+        &mut result.samples,
+        result.elapsed_seconds,
+        result.iterations,
+        &mut last_elapsed,
+        &mut last_iterations,
+    );
+}
+
+fn finish_result(result: &mut BenchmarkResult, panicked: bool, cancelled: bool) {
+    if panicked {
+        result.reason = "a benchmark worker panicked".into();
+    } else if cancelled {
+        result.status = Status::Cancelled;
+        result.reason = "cancelled".into();
+    } else if result.iterations == 0 || result.elapsed_seconds == 0.0 {
+        result.reason = "measurement window was too short to complete any work".into();
+    } else {
+        result.status = Status::Completed;
+        result.score = Some(result.iterations as f64 / result.elapsed_seconds);
+        if result.samples.len() >= 2 {
+            let mean = result.score.unwrap();
+            let variance = result
+                .samples
+                .iter()
+                .map(|sample| {
+                    sample.duration_seconds * (sample.iterations_per_second - mean).powi(2)
+                })
+                .sum::<f64>()
+                / result.elapsed_seconds;
+            result.variation_percent = Some(variance.sqrt() / mean * 100.0);
+            result.unstable = result.variation_percent.unwrap() > 10.0;
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;
