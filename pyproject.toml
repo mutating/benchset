@@ -1,6 +1,7 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=68", "wheel", "filelock==3.16.1"]
+build-backend = "_benchset_build"
+backend-path = ["."]
 
 [project]
 name = "benchset"

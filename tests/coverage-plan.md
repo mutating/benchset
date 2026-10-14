@@ -33,6 +33,18 @@ than relying on Python tests to exercise uninstrumented Rust or Swift code.
 | CLI parameters | Help/version/unknown options, missing values, invalid floats/names, selected benchmark/default suite, repeated parser calls, original argv restored | Python CLI tests |
 | CLI completion | 0/stdout on success; 1/stderr on failure; 130/stderr on cancellation/interruption; stop suite; repeated Ctrl+C; interrupted completion; terminal progress/output failure; semantic rendering of optional fields/samples | Python CLI tests |
 
+## Source installation
+
+`test_build.py` separately checks the PEP 517 bootstrap: an existing Cargo needs
+no downloads; automatic setup uses a pinned SDK in a private cache; concurrent
+builds install it once; incomplete caches are repaired; failed installs clean up
+and can retry; installer checksums are verified before execution; platform cache
+paths and Windows executable suffixes are preserved. Parent environment values
+are checked for accidental mutation. `scripts/check_source_install.py` exercises
+an actual pip install in a new venv with Cargo hidden from PATH and runs the
+installed CLI outside the source checkout. CI runs this on Linux, Windows and
+both Mac architectures. These build utilities stay outside runtime coverage.
+
 ## Coverage gates
 
 Production scope is `benchset/*.py`, all runtime `.rs` files in `native/src`, and

@@ -21,8 +21,15 @@ python -m benchset --warmup 0 --duration 1
 
 The last command is a smoke test, not a sustained performance measurement.
 Supported wheels include the native library: Rust is not required at runtime
-or to install a wheel. Installing from a source distribution requires Cargo
-and a platform linker/SDK.
+or to install a wheel. `pip install .` and source distributions build the Rust
+core automatically. If Cargo is not on PATH, the build downloads the pinned Rust
+version with [rustup](https://rust-lang.github.io/rustup/installation/other.html)
+into a private user cache and reuses it on later builds. No shell profile or
+system PATH changes are made, and no manual environment setup is required.
+The first such build needs internet access. Source compilation still requires
+the platform linker/SDK: macOS Command Line Tools, a Linux C toolchain, or
+Windows MSVC Build Tools with the Windows SDK. Prebuilt wheels need none of
+these build tools.
 
 | CLI option | Default | Meaning |
 |---|---:|---|

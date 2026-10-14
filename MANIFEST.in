@@ -1,3 +1,4 @@
+include _benchset_build.py setup.py
 include Cargo.toml Cargo.lock rust-toolchain.toml LICENSE README.md
 recursive-include native *.rs
 recursive-include include *.h *.modulemap

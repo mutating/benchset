@@ -138,3 +138,24 @@ jobs:
             target/coverage/swift/*.json
             target/coverage/swift/*.txt
           if-no-files-found: warn
+
+  source_install:
+    name: Source install without Cargo (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/benchset/rust
+            ~/Library/Caches/benchset/rust
+            ~/AppData/Local/benchset/rust
+          key: benchset-bootstrap-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install into a fresh venv and run the installed CLI
+        run: python scripts/check_source_install.py

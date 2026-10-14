@@ -1,9 +1,8 @@
 """Build an interpreter-independent platform wheel containing the Rust CDylib."""
-import re
-import os
 import platform
-import struct
+import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +10,8 @@ from pathlib import Path
 from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
+
+from _benchset_build import rust_environment
 
 ROOT = Path(__file__).parent.resolve()
 
@@ -44,11 +45,11 @@ class BuildNative(build_py):
         python_version = re.search(r"^__version__ = '([^']+)'", (ROOT / 'benchset/models.py').read_text(), re.M).group(1)
         if versions != [python_version, python_version]:
             raise RuntimeError('Cargo, Python metadata and models.py versions must match')
-        cargo = shutil.which('cargo')
-        if cargo is None:
-            raise RuntimeError('Building from source requires Cargo; install Rust or use a prebuilt wheel')
         target = rust_target()
-        environment = os.environ.copy()
+        environment = rust_environment(ROOT, target)
+        cargo = shutil.which('cargo', path=environment.get('PATH'))
+        if cargo is None:
+            raise RuntimeError('Cargo is unavailable after automatic Rust preparation')
         if sys.platform == 'darwin':
             minimum = '11.0' if target.startswith('aarch64') else '10.12'
             requested = environment.get('MACOSX_DEPLOYMENT_TARGET', minimum)
