@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==68.0.0"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,11 +8,10 @@ version = "0.0.1"
 authors = [
   { name="Evgeniy Blinov", email="zheni-b@yandex.ru" },
 ]
-description = ''
+description = 'Sustained scalar CPU benchmarks with an embeddable Rust core'
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    'microbenchmark>=0.0.3',
     'skelet>=0.0.21',
 ]
 classifiers = [
@@ -43,6 +42,15 @@ keywords = [
 
 [tool.setuptools.package-data]
 "benchset" = ["py.typed"]
+
+[project.scripts]
+benchset = "benchset.cli:main"
+
+[[tool.mypy.overrides]]
+module = ["benchset._native", "benchset.cli"]
+disallow_any_expr = false
+disallow_any_explicit = false
+disallow_any_unimported = false
 
 [tool.setuptools.packages.find]
 include = ["benchset*"]

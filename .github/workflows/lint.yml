@@ -22,7 +22,7 @@ jobs:
           allow-prereleases: true
           check-latest: ${{ matrix.python-version == '3.15' }}
 
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: dtolnay/rust-toolchain@1.94.1
       with:
         components: rustfmt, clippy
 

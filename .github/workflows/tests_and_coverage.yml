@@ -9,8 +9,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [macos-15-intel, ubuntu-latest, windows-latest]
         python-version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14', '3.14t', '3.15']
+        include:
+          - os: macos-15
+            python-version: '3.13'
+          - os: macos-15
+            python-version: '3.14t'
+          - os: macos-15
+            python-version: '3.15'
 
     steps:
     - uses: actions/checkout@v4
@@ -21,6 +28,11 @@ jobs:
           # Prerelease CPython ABIs can change; keep 3.15 aligned with current wheels.
           allow-prereleases: true
           check-latest: ${{ matrix.python-version == '3.15' }}
+
+    - uses: dtolnay/rust-toolchain@1.94.1
+
+    - name: Test Rust core
+      run: cargo test -- --test-threads=1
 
     - name: Set up uv
       uses: astral-sh/setup-uv@v7
@@ -34,6 +46,9 @@ jobs:
     - name: Install the library
       shell: bash
       run: uv pip install --system .
+
+    - name: Build native library for source tests
+      run: python scripts/build_native.py
 
     - name: Print all libs
       shell: bash
@@ -69,3 +84,57 @@ jobs:
         BENCHSET_COVERAGE_BRANCH=true COVERAGE_PROCESS_START="$PWD/pyproject.toml" coverage run -m pytest -n auto --cache-clear --assert=plain
         coverage combine
         coverage report -m --fail-under=100
+
+  rust_coverage:
+    name: Rust coverage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: llvm-tools-preview
+      - name: Enforce 100% Rust source coverage
+        run: python scripts/check_native_coverage.py rust
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-coverage-${{ matrix.os }}
+          path: |
+            target/coverage/rust/*.json
+            target/coverage/rust/*.txt
+          if-no-files-found: warn
+
+  swift_coverage:
+    name: Swift coverage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Build universal native library
+        run: python scripts/package_native.py --target aarch64-apple-darwin --apple
+      - name: Check the library deployment target
+        run: swift build
+      - name: Enforce 100% Swift source coverage
+        run: python scripts/check_native_coverage.py swift
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swift-coverage-${{ matrix.os }}
+          path: |
+            target/coverage/swift/*.json
+            target/coverage/swift/*.txt
+          if-no-files-found: warn

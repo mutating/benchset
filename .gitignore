@@ -18,3 +18,9 @@ CLAUDE.md
 mutants
 planning_features.md
 coverage.xml
+target/
+.venv/
+benchset/_native/
+Artifacts/
+.build/
+release-artifacts/
