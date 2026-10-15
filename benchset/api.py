@@ -66,6 +66,8 @@ class BenchmarkRunner:
                 return self._failed(failure, 'this runner is already running')
             self._active = True
             self._cancelled = False
+        native: Optional[Native] = None
+        handle: Optional[int] = None
         try:
             native = Native()
             handle = native.create()
@@ -81,8 +83,10 @@ class BenchmarkRunner:
             return self._failed(failure, str(error))
         finally:
             with self._lock:
-                if self._native is not None and self._handle is not None:
-                    self._native.free(self._handle)
+                # Ownership starts at create(), before the handle is published
+                # for cancel(). Interruptions during publication must free it.
+                if native is not None and handle is not None:
+                    native.free(handle)
                 self._handle = None
                 self._native = None
                 self._active = False
