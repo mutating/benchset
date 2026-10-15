@@ -1,4 +1,4 @@
-# benchset
+![logo](https://raw.githubusercontent.com/mutating/benchset/develop/docs/assets/logo_1.svg)
 
 Sustained scalar CPU throughput, with an embeddable Rust core, a public C ABI,
 a Python library, a CLI, and a macOS Swift package. No Python interpreter is

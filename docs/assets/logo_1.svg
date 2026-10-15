@@ -1,0 +1,1046 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="1400"
+   height="415"
+   viewBox="0 0 1400 415"
+   role="img"
+   aria-labelledby="logo-title logo-desc"
+   version="1.1"
+   id="svg97"
+   sodipodi:docname="logo_1.svg"
+   inkscape:version="1.4.2 (ebf0e940, 2025-05-08)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="0.69333333"
+     inkscape:cx="600"
+     inkscape:cy="449.27885"
+     inkscape:window-width="2752"
+     inkscape:window-height="1186"
+     inkscape:window-x="0"
+     inkscape:window-y="25"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="svg97" />
+  <title
+     id="logo-title">benchset — soft mint</title>
+  <desc
+     id="logo-desc">Thirty elongated petals with soft mint and teal shading, a benchset wordmark, and the tagline CONSISTENT WORK / REAL RESULTS.</desc>
+  <defs
+     id="defs95">
+    <linearGradient
+       id="background-fill"
+       x1="0"
+       y1="0"
+       x2="1200"
+       y2="900"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="translate(83.653846,253.84615)">
+      <stop
+         offset="0"
+         stop-color="#0B1016"
+         id="stop1" />
+      <stop
+         offset="1"
+         stop-color="#0B1319"
+         id="stop2" />
+    </linearGradient>
+    <radialGradient
+       id="ambient-light"
+       cx="633"
+       cy="252"
+       r="270"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="translate(73.557692,243.75)">
+      <stop
+         offset="0"
+         stop-color="#46BAA6"
+         stop-opacity="0.012"
+         id="stop3" />
+      <stop
+         offset="0.45"
+         stop-color="#46BAA6"
+         stop-opacity="0.045"
+         id="stop4" />
+      <stop
+         offset="1"
+         stop-color="#46BAA6"
+         stop-opacity="0"
+         id="stop5" />
+    </radialGradient>
+    <filter
+       id="petal-bloom"
+       filterUnits="userSpaceOnUse"
+       x="-192"
+       y="-192"
+       width="384"
+       height="384"
+       color-interpolation-filters="sRGB">
+      <feGaussianBlur
+         in="SourceGraphic"
+         stdDeviation="4.5"
+         result="blur"
+         id="feGaussianBlur5" />
+      <feComponentTransfer
+         in="blur"
+         result="faint-bloom"
+         id="feComponentTransfer5">
+        <feFuncA
+           type="linear"
+           slope="0.13"
+           id="feFuncA5" />
+      </feComponentTransfer>
+      <feMerge
+         id="feMerge6">
+        <feMergeNode
+           in="faint-bloom"
+           id="feMergeNode5" />
+        <feMergeNode
+           in="SourceGraphic"
+           id="feMergeNode6" />
+      </feMerge>
+    </filter>
+    <linearGradient
+       id="petal-fill-00"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#275A5E"
+         id="stop6" />
+      <stop
+         offset="0.45"
+         stop-color="#1E5257"
+         id="stop7" />
+      <stop
+         offset="1"
+         stop-color="#16444A"
+         id="stop8" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-01"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#26575C"
+         id="stop9" />
+      <stop
+         offset="0.45"
+         stop-color="#1D4F55"
+         id="stop10" />
+      <stop
+         offset="1"
+         stop-color="#164148"
+         id="stop11" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-02"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#235258"
+         id="stop12" />
+      <stop
+         offset="0.45"
+         stop-color="#1B4B51"
+         id="stop13" />
+      <stop
+         offset="1"
+         stop-color="#153E45"
+         id="stop14" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-03"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#204C52"
+         id="stop15" />
+      <stop
+         offset="0.45"
+         stop-color="#1A454D"
+         id="stop16" />
+      <stop
+         offset="1"
+         stop-color="#143941"
+         id="stop17" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-04"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#1F4850"
+         id="stop18" />
+      <stop
+         offset="0.45"
+         stop-color="#19424A"
+         id="stop19" />
+      <stop
+         offset="1"
+         stop-color="#13373F"
+         id="stop20" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-05"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#214D54"
+         id="stop21" />
+      <stop
+         offset="0.45"
+         stop-color="#1A464E"
+         id="stop22" />
+      <stop
+         offset="1"
+         stop-color="#143A42"
+         id="stop23" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-06"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#295F62"
+         id="stop24" />
+      <stop
+         offset="0.45"
+         stop-color="#1F565A"
+         id="stop25" />
+      <stop
+         offset="1"
+         stop-color="#17474D"
+         id="stop26" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-07"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#387F7C"
+         id="stop27" />
+      <stop
+         offset="0.45"
+         stop-color="#277371"
+         id="stop28" />
+      <stop
+         offset="1"
+         stop-color="#1C5F61"
+         id="stop29" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-08"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#54BAAD"
+         id="stop30" />
+      <stop
+         offset="0.45"
+         stop-color="#37A99B"
+         id="stop31" />
+      <stop
+         offset="1"
+         stop-color="#268A87"
+         id="stop32" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-09"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#5FD2C0"
+         id="stop33" />
+      <stop
+         offset="0.45"
+         stop-color="#3EBFAC"
+         id="stop34" />
+      <stop
+         offset="1"
+         stop-color="#2A9C96"
+         id="stop35" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-10"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#62D7C4"
+         id="stop36" />
+      <stop
+         offset="0.45"
+         stop-color="#3FC3B0"
+         id="stop37" />
+      <stop
+         offset="1"
+         stop-color="#2AA099"
+         id="stop38" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-11"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#63DAC7"
+         id="stop39" />
+      <stop
+         offset="0.45"
+         stop-color="#40C6B2"
+         id="stop40" />
+      <stop
+         offset="1"
+         stop-color="#2BA29B"
+         id="stop41" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-12"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#63DAC7"
+         id="stop42" />
+      <stop
+         offset="0.45"
+         stop-color="#40C6B2"
+         id="stop43" />
+      <stop
+         offset="1"
+         stop-color="#2BA29B"
+         id="stop44" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-13"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#63DAC7"
+         id="stop45" />
+      <stop
+         offset="0.45"
+         stop-color="#40C6B2"
+         id="stop46" />
+      <stop
+         offset="1"
+         stop-color="#2BA29B"
+         id="stop47" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-14"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#62D8C6"
+         id="stop48" />
+      <stop
+         offset="0.45"
+         stop-color="#40C5B1"
+         id="stop49" />
+      <stop
+         offset="1"
+         stop-color="#2BA19A"
+         id="stop50" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-15"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#62D7C4"
+         id="stop51" />
+      <stop
+         offset="0.45"
+         stop-color="#3FC3B0"
+         id="stop52" />
+      <stop
+         offset="1"
+         stop-color="#2AA099"
+         id="stop53" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-16"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#61D5C3"
+         id="stop54" />
+      <stop
+         offset="0.45"
+         stop-color="#3FC2AF"
+         id="stop55" />
+      <stop
+         offset="1"
+         stop-color="#2A9E98"
+         id="stop56" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-17"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#60D4C2"
+         id="stop57" />
+      <stop
+         offset="0.45"
+         stop-color="#3EC0AD"
+         id="stop58" />
+      <stop
+         offset="1"
+         stop-color="#2A9D97"
+         id="stop59" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-18"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#5FD2C0"
+         id="stop60" />
+      <stop
+         offset="0.45"
+         stop-color="#3EBFAC"
+         id="stop61" />
+      <stop
+         offset="1"
+         stop-color="#2A9C96"
+         id="stop62" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-19"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#5ED0BF"
+         id="stop63" />
+      <stop
+         offset="0.45"
+         stop-color="#3DBDAB"
+         id="stop64" />
+      <stop
+         offset="1"
+         stop-color="#299B95"
+         id="stop65" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-20"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#5ECFBE"
+         id="stop66" />
+      <stop
+         offset="0.45"
+         stop-color="#3DBCAA"
+         id="stop67" />
+      <stop
+         offset="1"
+         stop-color="#299A94"
+         id="stop68" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-21"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#5CCCBB"
+         id="stop69" />
+      <stop
+         offset="0.45"
+         stop-color="#3CB9A8"
+         id="stop70" />
+      <stop
+         offset="1"
+         stop-color="#299792"
+         id="stop71" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-22"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#5AC7B7"
+         id="stop72" />
+      <stop
+         offset="0.45"
+         stop-color="#3BB5A4"
+         id="stop73" />
+      <stop
+         offset="1"
+         stop-color="#28948F"
+         id="stop74" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-23"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#57C0B2"
+         id="stop75" />
+      <stop
+         offset="0.45"
+         stop-color="#39AFA0"
+         id="stop76" />
+      <stop
+         offset="1"
+         stop-color="#278F8B"
+         id="stop77" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-24"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#52B7AA"
+         id="stop78" />
+      <stop
+         offset="0.45"
+         stop-color="#37A699"
+         id="stop79" />
+      <stop
+         offset="1"
+         stop-color="#258885"
+         id="stop80" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-25"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#4CAAA0"
+         id="stop81" />
+      <stop
+         offset="0.45"
+         stop-color="#339A90"
+         id="stop82" />
+      <stop
+         offset="1"
+         stop-color="#237F7D"
+         id="stop83" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-26"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#459A93"
+         id="stop84" />
+      <stop
+         offset="0.45"
+         stop-color="#2F8C84"
+         id="stop85" />
+      <stop
+         offset="1"
+         stop-color="#217373"
+         id="stop86" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-27"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#3D8884"
+         id="stop87" />
+      <stop
+         offset="0.45"
+         stop-color="#2A7C78"
+         id="stop88" />
+      <stop
+         offset="1"
+         stop-color="#1E6667"
+         id="stop89" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-28"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#337473"
+         id="stop90" />
+      <stop
+         offset="0.45"
+         stop-color="#246969"
+         id="stop91" />
+      <stop
+         offset="1"
+         stop-color="#1A565A"
+         id="stop92" />
+    </linearGradient>
+    <linearGradient
+       id="petal-fill-29"
+       x1="0"
+       y1="-151"
+       x2="0"
+       y2="-93"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#2C6466"
+         id="stop93" />
+      <stop
+         offset="0.45"
+         stop-color="#205B5E"
+         id="stop94" />
+      <stop
+         offset="1"
+         stop-color="#184B50"
+         id="stop95" />
+    </linearGradient>
+  </defs>
+  <g
+     id="background" />
+  <g
+     id="mark"
+     transform="translate(200.48077,208.17308)">
+    <g
+       id="petals"
+       filter="url(#petal-bloom)">
+      <rect
+         id="petal-01"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-102)"
+         fill="url(#petal-fill-00)"
+         style="fill:url(#petal-fill-00)" />
+      <rect
+         id="petal-02"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-90)"
+         fill="url(#petal-fill-01)"
+         style="fill:url(#petal-fill-01)" />
+      <rect
+         id="petal-03"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-78)"
+         fill="url(#petal-fill-02)"
+         style="fill:url(#petal-fill-02)" />
+      <rect
+         id="petal-04"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-66)"
+         fill="url(#petal-fill-03)"
+         style="fill:url(#petal-fill-03)" />
+      <rect
+         id="petal-05"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-54)"
+         fill="url(#petal-fill-04)"
+         style="fill:url(#petal-fill-04)" />
+      <rect
+         id="petal-06"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-42)"
+         fill="url(#petal-fill-05)"
+         style="fill:url(#petal-fill-05)" />
+      <rect
+         id="petal-07"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-30)"
+         fill="url(#petal-fill-06)"
+         style="fill:url(#petal-fill-06)" />
+      <rect
+         id="petal-08"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-18)"
+         fill="url(#petal-fill-07)"
+         style="fill:url(#petal-fill-07)" />
+      <rect
+         id="petal-09"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-6)"
+         fill="url(#petal-fill-08)"
+         style="fill:url(#petal-fill-08)" />
+      <rect
+         id="petal-10"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(6)"
+         fill="url(#petal-fill-09)"
+         style="fill:url(#petal-fill-09)" />
+      <rect
+         id="petal-11"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(18)"
+         fill="url(#petal-fill-10)"
+         style="fill:url(#petal-fill-10)" />
+      <rect
+         id="petal-12"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(30)"
+         fill="url(#petal-fill-11)"
+         style="fill:url(#petal-fill-11)" />
+      <rect
+         id="petal-13"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(42)"
+         fill="url(#petal-fill-12)"
+         style="fill:url(#petal-fill-12)" />
+      <rect
+         id="petal-14"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(54)"
+         fill="url(#petal-fill-13)"
+         style="fill:url(#petal-fill-13)" />
+      <rect
+         id="petal-15"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(66)"
+         fill="url(#petal-fill-14)"
+         style="fill:url(#petal-fill-14)" />
+      <rect
+         id="petal-16"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(78)"
+         fill="url(#petal-fill-15)"
+         style="fill:url(#petal-fill-15)" />
+      <rect
+         id="petal-17"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(90)"
+         fill="url(#petal-fill-16)"
+         style="fill:url(#petal-fill-16)" />
+      <rect
+         id="petal-18"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(102)"
+         fill="url(#petal-fill-17)"
+         style="fill:url(#petal-fill-17)" />
+      <rect
+         id="petal-19"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(114)"
+         fill="url(#petal-fill-18)"
+         style="fill:url(#petal-fill-18)" />
+      <rect
+         id="petal-20"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(126)"
+         fill="url(#petal-fill-19)"
+         style="fill:url(#petal-fill-19)" />
+      <rect
+         id="petal-21"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(138)"
+         fill="url(#petal-fill-20)"
+         style="fill:url(#petal-fill-20)" />
+      <rect
+         id="petal-22"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(150)"
+         fill="url(#petal-fill-21)"
+         style="fill:url(#petal-fill-21)" />
+      <rect
+         id="petal-23"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(162)"
+         fill="url(#petal-fill-22)"
+         style="fill:url(#petal-fill-22)" />
+      <rect
+         id="petal-24"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(174)"
+         fill="url(#petal-fill-23)"
+         style="fill:url(#petal-fill-23)" />
+      <rect
+         id="petal-25"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-174)"
+         fill="url(#petal-fill-24)"
+         style="fill:url(#petal-fill-24)" />
+      <rect
+         id="petal-26"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-162)"
+         fill="url(#petal-fill-25)"
+         style="fill:url(#petal-fill-25)" />
+      <rect
+         id="petal-27"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-150)"
+         fill="url(#petal-fill-26)"
+         style="fill:url(#petal-fill-26)" />
+      <rect
+         id="petal-28"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-138)"
+         fill="url(#petal-fill-27)"
+         style="fill:url(#petal-fill-27)" />
+      <rect
+         id="petal-29"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-126)"
+         fill="url(#petal-fill-28)"
+         style="fill:url(#petal-fill-28)" />
+      <rect
+         id="petal-30"
+         x="-6"
+         y="-151"
+         width="12"
+         height="58"
+         rx="6"
+         transform="rotate(-114)"
+         fill="url(#petal-fill-29)"
+         style="fill:url(#petal-fill-29)" />
+    </g>
+  </g>
+  <text
+     xml:space="preserve"
+     style="font-size:200px;font-family:Avenir;-inkscape-font-specification:Avenir;text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;opacity:0.8;fill:#6652f0;stroke-width:2.7"
+     x="473.0769"
+     y="285.57693"
+     id="text1"><tspan
+       sodipodi:role="line"
+       id="tspan1"
+       x="473.0769"
+       y="285.57693"
+       style="fill:#5cc7b7;fill-opacity:1">benchset</tspan></text>
+  <metadata
+     id="metadata1">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:title>benchset — soft mint</dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+</svg>
