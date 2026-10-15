@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "filelock==3.16.1"]
+requires = ["setuptools>=68", "wheel", "filelock>=3.16.1"]
 build-backend = "scripts.build_backend"
 backend-path = ["."]
 

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 BENCHMARKS = ('single_core', 'multi_core')
 DEFAULT_WARMUP_SECONDS = 120.0
 DEFAULT_MEASUREMENT_SECONDS = 60.0
