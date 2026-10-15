@@ -8,7 +8,7 @@ than relying on Python tests to exercise uninstrumented Rust or Swift code.
 
 | Group | Scenarios | Tests |
 | --- | --- | --- |
-| Public contract | Names, version, units, defaults, one/all workers, immutable Python models, every result/progress/sample field, unsigned 64-bit limits | Rust `runtime_tests`, `ffi_tests`; Python `test_benchset`, `test_semantics`; Swift `resultAccountingAndProgress`, `everyNativeFieldAndOptionalMapping` |
+| Public contract | Names, version from Python package metadata, units, defaults, one/all workers, immutable Python models, every result/progress/sample field, unsigned 64-bit limits | Rust `runtime_tests`, `ffi_tests`; Python `test_benchset`, `test_semantics`; Swift `resultAccountingAndProgress`, `everyNativeFieldAndOptionalMapping` |
 | Durations | Zero/negative/negative-zero, NaN, both infinities, finite overflow, subnanosecond rounding, monotonic-clock overflow, invalid inputs do not reserve runner | Rust `invalid_and_overflow_durations`, `invalid_config_matrix`; Python validation/limits/type tests; Swift `invalidDurationsAndRecovery` |
 | Python type contract | Numeric conversion errors raise before native initialization; runner remains reusable | Python `test_invalid_python_types_raise_before_start_and_do_not_poison_runner` |
 | Phases and callbacks | Observed phase order (short phases may be skipped), zero warmup, monotonic bounded fraction, phase durations, caller-thread execution, terminal iteration count | Real-run tests in all three languages; controlled ctypes callbacks verify each Python phase |
@@ -28,6 +28,7 @@ than relying on Python tests to exercise uninstrumented Rust or Swift code.
 | C ABI recovery/mapping | Native panic converted to failure; poisoned mutex recovery; Unicode/NUL sanitization; absent/present score/CV, instability and all sample fields | Rust `panic_boundary_create_and_poison_recovery`, `complete_result_mapping_unicode_nul_and_large_unsigned_fields` |
 | Python loader | DLL/dylib/SO selection; native ABI and package version independently checked; ctypes signatures | Python loader/version tests |
 | Wrapper cleanup | Constructor/create/execute/config/result/sample failure; free exactly once; no calls on freed handles; reuse after failure | Python managed-native/getter/cleanup-race tests; Swift `nativeErrorsFreeExactlyOnceAndRunnerIsReusable` |
+| Resource lifetimes | Callback captures released with cyclic GC disabled after success/cancellation/callback or native failure; handle freed if publication is interrupted; Swift callback captures and runner released on every exit | Python `test_resources`; Swift `callbackCapturesAndRunnerReleaseOnAllExits` |
 | Swift callback ownership | Null progress/context ignored, context/closure captures alive during native call and released afterwards | Swift `nullableCallbacksAndContextLifetime` with private C-function table |
 | Suite | Single then multi; parameters/callback forwarded; stops after failure/cancel on either step | Python suite tests |
 | CLI parameters | Help/version/unknown options, missing values, invalid floats/names, selected benchmark/default suite, repeated parser calls, original argv restored | Python CLI tests |

@@ -379,4 +379,35 @@ struct BenchsetTests {
         #expect(observed == nil)
         #expect(stub.frees == 1)
     }
+
+    @Test func callbackCapturesAndRunnerReleaseOnAllExits() throws {
+        final class Probe { var calls = 0 }
+        for stage in ["allocation", "config", "result", "sample", "completed"] {
+            let stub = NativeStub()
+            stub.allocationFails = stage == "allocation"
+            stub.configAvailable = stage != "config"
+            stub.resultAvailable = stage != "result"
+            stub.missingSample = stage == "sample" ? 0 : nil
+            weak var observed: Probe?
+            weak var observedRunner: BenchmarkRunner?
+            func makeCallback() -> (Benchset.Progress) -> Void {
+                let probe = Probe()
+                observed = probe
+                return { _ in probe.calls += 1 }
+            }
+            do {
+                let runner = BenchmarkRunner(native: stub.api)
+                observedRunner = runner
+                if stage == "completed" {
+                    #expect(try runner.run(.singleCore, onProgress: makeCallback()).success)
+                } else {
+                    let error: BenchsetError = stage == "allocation" ? .allocationFailed : .resultUnavailable
+                    #expect(throws: error) { try runner.run(.singleCore, onProgress: makeCallback()) }
+                }
+                #expect(observed == nil)
+                #expect(stub.frees == (stage == "allocation" ? 0 : 1))
+            }
+            #expect(observedRunner == nil)
+        }
+    }
 }

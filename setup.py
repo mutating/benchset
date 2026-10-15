@@ -40,11 +40,9 @@ class NativeDistribution(Distribution):
 class BuildNative(build_py):
     def run(self):
         super().run()
-        versions = [re.search(r'^version\s*=\s*[\'"]([^\'"]+)', (ROOT / name).read_text(), re.M).group(1)
-                    for name in ('Cargo.toml', 'pyproject.toml')]
-        python_version = re.search(r"^__version__ = '([^']+)'", (ROOT / 'benchset/models.py').read_text(), re.M).group(1)
-        if versions != [python_version, python_version]:
-            raise RuntimeError('Cargo, Python metadata and models.py versions must match')
+        native_version = re.search(r'^version\s*=\s*[\'"]([^\'"]+)', (ROOT / 'Cargo.toml').read_text(), re.M).group(1)
+        if native_version != self.distribution.get_version():
+            raise RuntimeError('Cargo and Python metadata versions must match')
         target = rust_target()
         environment = rust_environment(ROOT, target)
         cargo = shutil.which('cargo', path=environment.get('PATH'))

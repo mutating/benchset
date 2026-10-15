@@ -158,41 +158,46 @@ class Native:
                 self.cancel(handle)
 
         c_callback = Callback(callback)
-        self.lib.benchset_run(handle, ctypes.byref(config), c_callback, None)
-        value = CResult()
-        if not self.lib.benchset_result(handle, ctypes.byref(value)):
-            raise RuntimeError('native library did not return a result')
-        samples = []
-        for index in range(value.sample_count):
-            sample = CSample()
-            if not self.lib.benchset_sample(handle, index, ctypes.byref(sample)):
-                raise RuntimeError('native sample is unavailable')
-            samples.append(
-                Sample(
-                    sample.elapsed_seconds,
-                    sample.duration_seconds,
-                    sample.iterations,
-                    sample.iterations_per_second,
-                ),
+        try:
+            self.lib.benchset_run(handle, ctypes.byref(config), c_callback, None)
+            value = CResult()
+            if not self.lib.benchset_result(handle, ctypes.byref(value)):
+                raise RuntimeError('native library did not return a result')
+            samples = []
+            for index in range(value.sample_count):
+                sample = CSample()
+                if not self.lib.benchset_sample(handle, index, ctypes.byref(sample)):
+                    raise RuntimeError('native sample is unavailable')
+                samples.append(
+                    Sample(
+                        sample.elapsed_seconds,
+                        sample.duration_seconds,
+                        sample.iterations,
+                        sample.iterations_per_second,
+                    ),
+                )
+            reason = self.lib.benchset_reason(handle)
+            status = {0: 'completed', 1: 'cancelled', 2: 'failed'}[value.status]
+            message = reason.decode('utf-8') if reason else None
+            if callback_errors:
+                status = 'failed'
+                message = f'progress callback failed: {type(callback_errors[0]).__name__}: {callback_errors[0]}'
+            return BenchmarkResult(
+                benchmark=benchmark,
+                status=status,
+                reason=message,
+                score=value.score if status == 'completed' else None,
+                workers=value.workers,
+                warmup_seconds=value.warmup_seconds,
+                measurement_seconds=value.measurement_seconds,
+                elapsed_seconds=value.elapsed_seconds,
+                iterations=value.iterations,
+                checksum=value.checksum,
+                samples=tuple(samples),
+                variation_percent=value.variation_percent if value.has_variation else None,
+                unstable=bool(value.unstable),
             )
-        reason = self.lib.benchset_reason(handle)
-        status = {0: 'completed', 1: 'cancelled', 2: 'failed'}[value.status]
-        message = reason.decode('utf-8') if reason else None
-        if callback_errors:
-            status = 'failed'
-            message = f'progress callback failed: {type(callback_errors[0]).__name__}: {callback_errors[0]}'
-        return BenchmarkResult(
-            benchmark=benchmark,
-            status=status,
-            reason=message,
-            score=value.score if status == 'completed' else None,
-            workers=value.workers,
-            warmup_seconds=value.warmup_seconds,
-            measurement_seconds=value.measurement_seconds,
-            elapsed_seconds=value.elapsed_seconds,
-            iterations=value.iterations,
-            checksum=value.checksum,
-            samples=tuple(samples),
-            variation_percent=value.variation_percent if value.has_variation else None,
-            unstable=bool(value.unstable),
-        )
+        finally:
+            # Tracebacks retain the callback frame and its captured user data.
+            # Break that cycle even if running or decoding the result fails.
+            callback_errors.clear()

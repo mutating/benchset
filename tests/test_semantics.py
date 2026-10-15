@@ -1,6 +1,8 @@
 """Behavioral boundaries beyond line coverage: ownership, callbacks and decoding."""
 
 import ctypes
+import importlib.metadata
+import importlib.util
 import io
 import math
 import sys
@@ -30,6 +32,26 @@ from benchset._native import (
     CSample,
     Native,
 )
+
+
+def test_model_and_result_versions_come_from_package_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested: List[str] = []
+
+    def distribution_version(name: str) -> str:
+        requested.append(name)
+        return '7.8.9'
+
+    monkeypatch.setattr(importlib.metadata, 'version', distribution_version)
+    path = Path(__file__).resolve().parents[1] / 'benchset/models.py'
+    specification = importlib.util.spec_from_file_location('benchset_version_probe', path)
+    assert specification is not None
+    assert specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    monkeypatch.setitem(sys.modules, specification.name, module)
+    specification.loader.exec_module(module)
+    assert requested == ['benchset']
+    assert module.__version__ == '7.8.9'
+    assert module.BenchmarkResult('single_core').version == '7.8.9'
 
 
 @pytest.mark.parametrize(('warmup', 'measurement'), [

@@ -17,10 +17,8 @@ VERSION = '0.0.1'
 def source(tmp_path: Path) -> Path:
     root = tmp_path / 'project'
     root.mkdir()
-    (root / 'benchset').mkdir()
     (root / 'Cargo.toml').write_text('[package]\nname = "benchset"\nversion = "0.0.1"\n')
     (root / 'pyproject.toml').write_text('[project]\nversion = "0.0.1"\n')
-    (root / 'benchset/models.py').write_text("__version__ = '0.0.1'\n")
     (root / '.gitignore').write_text('target/\n')
     manifest = Path(__file__).resolve().parents[1] / 'Package.swift'
     (root / 'Package.swift').write_text(manifest.read_text())
