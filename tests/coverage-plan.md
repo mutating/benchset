@@ -8,7 +8,7 @@ than relying on Python tests to exercise uninstrumented Rust or Swift code.
 
 | Group | Scenarios | Tests |
 | --- | --- | --- |
-| Public contract | Names, version, units, defaults, one/all workers, immutable Python models, every result/progress/sample field, unsigned 64-bit limits | Rust `runtime_tests`, `ffi_tests`; Python `test_benchset`, `test_semantics`; Swift `resultAccountingAndProgress`, `everyNativeFieldAndOptionalMapping` |
+| Public contract | Names, version from Python package metadata, units, defaults, one/all workers, immutable Python models, every result/progress/sample field, unsigned 64-bit limits | Rust `runtime_tests`, `ffi_tests`; Python `test_benchset`, `test_semantics`; Swift `resultAccountingAndProgress`, `everyNativeFieldAndOptionalMapping` |
 | Durations | Zero/negative/negative-zero, NaN, both infinities, finite overflow, subnanosecond rounding, monotonic-clock overflow, invalid inputs do not reserve runner | Rust `invalid_and_overflow_durations`, `invalid_config_matrix`; Python validation/limits/type tests; Swift `invalidDurationsAndRecovery` |
 | Python type contract | Numeric conversion errors raise before native initialization; runner remains reusable | Python `test_invalid_python_types_raise_before_start_and_do_not_poison_runner` |
 | Phases and callbacks | Observed phase order (short phases may be skipped), zero warmup, monotonic bounded fraction, phase durations, caller-thread execution, terminal iteration count | Real-run tests in all three languages; controlled ctypes callbacks verify each Python phase |

@@ -173,10 +173,11 @@ An unstable run retains its score and completed status; the consumer decides
 whether to use it. Cancellation/failure can retain partial diagnostics but
 never produces a usable score.
 
-The native library and Python package share one version. Every release,
-including a workload or default change, updates `Cargo.toml`, `pyproject.toml`
-and `benchset/models.py` together; the build checks consistency. Consumers
-decide which versions and measurement settings are comparable.
+The Python package version is defined in `pyproject.toml`. `benchset.__version__`
+and result objects read the installed package metadata through
+`importlib.metadata`; no Python source version constant needs updating.
+The native library shares this version; builds check its Cargo metadata for
+consistency. Consumers decide which versions and measurement settings are comparable.
 
 ## Embed in Rust
 
@@ -300,6 +301,7 @@ are not part of the initial prebuilt matrix.
 python -m venv .venv
 # Activate the virtual environment using your shell's normal command.
 pip install -r requirements_dev.txt 'skelet>=0.0.21' wheel setuptools
+pip install .
 python scripts/build_native.py
 python -m pytest
 cargo test -- --test-threads=1
@@ -344,7 +346,7 @@ All distributions are released from this repository by
 `.github/workflows/release.yml`. A push to `main` checks the common package
 version. An unreleased version is built and published automatically; a version
 whose managed GitHub Release is already published is skipped. To release a new
-version, update `Cargo.toml`, `pyproject.toml` and `benchset/models.py` together,
+version, update `Cargo.toml` and `pyproject.toml` together,
 run `cargo generate-lockfile` to update `Cargo.lock`, commit the changes and
 push to `main`. Use an `X.Y.Z` version. Do not create or move release tags
 manually.

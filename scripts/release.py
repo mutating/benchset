@@ -39,14 +39,13 @@ def version(root: Path) -> str:
     for filename, pattern in (
         ('Cargo.toml', r'^version\s*=\s*"([^"]+)"'),
         ('pyproject.toml', r'^version\s*=\s*"([^"]+)"'),
-        ('benchset/models.py', r"^__version__\s*=\s*'([^']+)'"),
     ):
         match = re.search(pattern, (root / filename).read_text(), re.M)
         if match is None:
             raise ValueError('Missing package version in ' + filename)
         values.append(match.group(1))
     if len(set(values)) != 1:
-        raise ValueError('Cargo, Python metadata and models.py versions must match')
+        raise ValueError('Cargo and Python metadata versions must match')
     if re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', values[0]) is None:
         raise ValueError('Automatic releases require an X.Y.Z version')
     lockfile = root / 'Cargo.lock'
