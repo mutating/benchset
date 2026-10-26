@@ -26,6 +26,10 @@ from benchset import (
     cli,
 )
 
+# Content checks allow slow interpreter startup on shared runners. Cancellation
+# and terminal-disconnect responsiveness retain their separate 5-second bounds.
+CLI_PROCESS_TIMEOUT = 30
+
 
 def assert_short_cli_completed_or_no_work(
     result: subprocess.CompletedProcess, names: List[str], warmup: float, encoding: str = 'utf-8',
@@ -163,10 +167,8 @@ def test_information_is_complete_and_has_no_stderr(
     invocation: Tuple[List[str], Dict[str, str]], option: str,
 ) -> None:
     command, environment = invocation
-    # Shared CI runners can delay interpreter startup; this checks content,
-    # while cancellation responsiveness has its own stricter deadlines.
     result = subprocess.run([*command, option], env=environment, capture_output=True,
-                            encoding='utf-8', check=False, timeout=30)
+                            encoding='utf-8', check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert result.returncode == 0, result.stderr
     assert not result.stderr
     if option == '--version':
@@ -200,7 +202,7 @@ def test_invalid_arguments_are_actionable_without_a_traceback(
 ) -> None:
     command, environment = invocation
     result = subprocess.run([*command, *arguments], env=environment, capture_output=True,
-                            encoding='utf-8', check=False, timeout=10)
+                            encoding='utf-8', check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert result.returncode == 2
     assert not result.stdout
     assert 'usage: benchset' in result.stderr
@@ -223,7 +225,7 @@ def test_real_entrypoints_accept_selection_order_numeric_forms_and_redirected_ou
         [f'--{name}={value}'] if equals else ['--' + name, value]
     )]
     result = subprocess.run([*command, *arguments], env=environment, capture_output=True,
-                            check=False, timeout=10)
+                            check=False, timeout=CLI_PROCESS_TIMEOUT)
     names = ['single_core', 'multi_core'] if benchmark is None or benchmark == 'all' else [benchmark]
     assert_short_cli_completed_or_no_work(result, names, float(warmup))
 
@@ -268,7 +270,7 @@ def test_negative_zero_has_equivalent_cli_spellings(
     command, environment = invocation
     option = ['--warmup=' + value] if equals else ['--warmup', value]
     result = subprocess.run([*command, '--bench=single_core', '--duration=.03', *option],
-                            env=environment, capture_output=True, encoding='utf-8', check=False, timeout=10)
+                            env=environment, capture_output=True, encoding='utf-8', check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert_short_cli_completed_or_no_work(result, ['single_core'], float(value))
 
 
@@ -281,7 +283,7 @@ def test_negative_numeric_values_reach_their_option_validator(
 ) -> None:
     command, environment = invocation
     result = subprocess.run([*command, option, value], env=environment, capture_output=True,
-                            encoding='utf-8', check=False, timeout=10)
+                            encoding='utf-8', check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert result.returncode == 2
     assert not result.stdout
     assert option in result.stderr
@@ -295,7 +297,7 @@ def test_real_redirected_output_supports_non_unicode_encodings(
     command, environment = invocation
     environment['PYTHONIOENCODING'] = encoding + ':strict'
     result = subprocess.run([*command, '--bench=single_core', '--warmup=0', '--duration=.03'],
-                            env=environment, capture_output=True, check=False, timeout=10)
+                            env=environment, capture_output=True, check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert_short_cli_completed_or_no_work(result, ['single_core'], 0, encoding)
 
 
@@ -307,7 +309,7 @@ def test_native_duration_limits_report_failure_and_stop_the_suite(
 ) -> None:
     command, environment = invocation
     result = subprocess.run([*command, '--warmup=0', '--duration=.03', option, value],
-                            env=environment, capture_output=True, encoding='utf-8', check=False, timeout=10)
+                            env=environment, capture_output=True, encoding='utf-8', check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert result.returncode == 1
     assert not result.stdout
     assert 'failed' in result.stderr
@@ -552,7 +554,7 @@ def test_closed_output_pipe_exits_without_traceback_or_shutdown_warning(
                                 stdout=writer if destination != 'stderr' else subprocess.PIPE,
                                 stderr=writer if destination == 'stderr' else (
                                     subprocess.STDOUT if destination == 'merged' else subprocess.PIPE
-                                ), check=False, timeout=10)
+                                ), check=False, timeout=CLI_PROCESS_TIMEOUT)
     finally:
         os.close(writer)
     assert result.returncode == 1
@@ -610,7 +612,7 @@ else:
     command = [sys.executable, '-c', program, ','.join(map(str, closed)),
                'module' if len(command) > 1 else command[0], str(completed_fixture)]
     result = subprocess.run([*command, *arguments], env=environment, capture_output=True,
-                            encoding='utf-8', check=False, timeout=10)
+                            encoding='utf-8', check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
     assert 'Traceback' not in result.stderr
     assert 'Exception ignored' not in result.stderr
@@ -697,7 +699,7 @@ raise SystemExit(main(sys.argv[1:]))
                                  '--unknown' if destination == 'stderr' else '--version'],
                                 env=environment, stdout=sink if destination != 'stderr' else subprocess.PIPE,
                                 stderr=sink if destination != 'stdout' else subprocess.PIPE,
-                                text=True, check=False, timeout=10)
+                                text=True, check=False, timeout=CLI_PROCESS_TIMEOUT)
     assert result.returncode == 1
     assert 'Traceback' not in (result.stderr or '')
     assert 'Exception ignored' not in (result.stderr or '')
