@@ -163,8 +163,10 @@ def test_information_is_complete_and_has_no_stderr(
     invocation: Tuple[List[str], Dict[str, str]], option: str,
 ) -> None:
     command, environment = invocation
+    # Shared CI runners can delay interpreter startup; this checks content,
+    # while cancellation responsiveness has its own stricter deadlines.
     result = subprocess.run([*command, option], env=environment, capture_output=True,
-                            encoding='utf-8', check=False, timeout=10)
+                            encoding='utf-8', check=False, timeout=30)
     assert result.returncode == 0, result.stderr
     assert not result.stderr
     if option == '--version':
