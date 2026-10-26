@@ -550,13 +550,18 @@ def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
     execute([str(python), '-m', 'pip', 'check'], consumer, environment)
 
 
+@pytest.mark.parametrize('legacy_pip', [False, pytest.param(True, marks=pytest.mark.skipif(
+    sys.version_info[:2] != (3, 8), reason='The pip bundled with Windows Python 3.8 predates PEP 660',
+))])
 def test_editable_install_builds_the_native_version_from_pyproject(
-    bumped_source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path,
+    bumped_source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path, legacy_pip: bool,
 ) -> None:
     environment, _cargo, _target = rust_tools
     virtualenv = tmp_path / 'editable-venv'
     venv.EnvBuilder(with_pip=True, symlinks=os.name != 'nt').create(virtualenv)
     python = virtualenv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    if legacy_pip:
+        execute([str(python), '-m', 'pip', 'install', 'pip==21.1.1'], tmp_path, environment)
     for expected_version in ('9.8.7', '9.8.8'):
         if expected_version == '9.8.8':
             configuration = bumped_source_snapshot / 'pyproject.toml'

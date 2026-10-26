@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import io
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -134,18 +134,20 @@ def test_failed_generated_write_leaves_the_source_and_copies_intact(
     project: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     before = contents(project)
-    original_open = io.open
+    original_file = tempfile.NamedTemporaryFile
     writes = 0
 
-    def open_file(file: Any, mode: str = 'r', *args: Any, **kwargs: Any) -> Any:
+    def temporary_file(*args: Any, **kwargs: Any) -> Any:
         nonlocal writes
-        if 'w' in mode:
-            writes += 1
-            if writes == 2:
+        stream = original_file(*args, **kwargs)
+        writes += 1
+        if writes == 2:
+            def fail_write(_text: str) -> None:
                 raise OSError(28, 'No space left on device')
-        return original_open(file, mode, *args, **kwargs)
+            monkeypatch.setattr(stream, 'write', fail_write)
+        return stream
 
-    monkeypatch.setattr(io, 'open', open_file)
+    monkeypatch.setattr(tempfile, 'NamedTemporaryFile', temporary_file)
     with pytest.raises(OSError, match='No space left'):
         sync_version(project, '2.0.0')
     assert contents(project) == before

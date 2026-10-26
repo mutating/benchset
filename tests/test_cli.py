@@ -577,34 +577,39 @@ def test_closed_standard_descriptors_do_not_crash(
 ) -> None:
     command, environment = invocation
 
-    def close_descriptors() -> None:
-        for descriptor in closed:
-            os.close(descriptor)
-
+    # Establish missing streams after interpreter startup: free-threaded
+    # runtimes may use an initially closed descriptor during initialization.
+    # Exercise each entry point with real closed descriptors and Python's None
+    # representation, independently of those interpreter implementation details.
     completed_fixture = closed == (2,) and arguments[0].startswith('--bench=')
-    if completed_fixture:
-        # Exercise the successful stdout path with Python's real missing stderr,
-        # independently of whether a short native window gets scheduled work.
-        program = '''
+    program = r'''
+import os
 import runpy
 import sys
-from benchset import BenchmarkResult, BenchmarkRunner
-assert sys.stderr is None
-def completed(_self, name, *, warmup_seconds, measurement_seconds, **_options):
-    return BenchmarkResult(name, status='completed', score=2000, pi_equivalent=1,
-                           warmup_seconds=warmup_seconds, measurement_seconds=measurement_seconds)
-BenchmarkRunner.run = completed
-entrypoint = sys.argv[1]
-sys.argv = ['benchset', *sys.argv[2:]]
+closed, entrypoint, completed = sys.argv[1:4]
+sys.argv = ['benchset', *sys.argv[4:]]
+for descriptor in map(int, closed.split(',')):
+    os.close(descriptor)
+    if descriptor == 1:
+        sys.stdout = None
+    elif descriptor == 2:
+        sys.stderr = None
+if completed == 'True':
+    from benchset import BenchmarkResult, BenchmarkRunner
+    def completed_result(_self, name, *, warmup_seconds, measurement_seconds, **_options):
+        return BenchmarkResult(name, status='completed', score=2000, pi_equivalent=1,
+                               warmup_seconds=warmup_seconds, measurement_seconds=measurement_seconds)
+    BenchmarkRunner.run = completed_result
 if entrypoint == 'module':
     runpy.run_module('benchset', run_name='__main__', alter_sys=True)
 else:
     runpy.run_path(entrypoint, run_name='__main__')
 '''
-        command = [sys.executable, '-c', program, 'module' if len(command) > 1 else command[0]]
+    command = [sys.executable, '-c', program, ','.join(map(str, closed)),
+               'module' if len(command) > 1 else command[0], str(completed_fixture)]
     result = subprocess.run([*command, *arguments], env=environment, capture_output=True,
-                            encoding='utf-8', preexec_fn=close_descriptors, check=False, timeout=10)
-    assert result.returncode == status, result.stderr
+                            encoding='utf-8', check=False, timeout=10)
+    assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
     assert 'Traceback' not in result.stderr
     assert 'Exception ignored' not in result.stderr
     if 1 in closed and 2 not in closed:
@@ -642,6 +647,25 @@ def test_missing_stdout_is_a_handled_error_even_without_stderr(
     monkeypatch.setattr(cli.sys, 'stderr', None if missing_stderr else errors)
     assert cli.main(['--version']) == 1
     assert errors.getvalue() == ('' if missing_stderr else 'benchset: error: standard output is unavailable\n')
+
+
+@pytest.mark.parametrize(('status', 'expected'), [('failed', 1), ('cancelled', 130)])
+def test_missing_stderr_preserves_unsuccessful_benchmark_exit_status(
+    monkeypatch: pytest.MonkeyPatch, status: str, expected: int,
+) -> None:
+    calls: List[str] = []
+
+    def run(_runner: BenchmarkRunner, name: str, **_options: object) -> BenchmarkResult:
+        calls.append(name)
+        return BenchmarkResult(name, status=status)
+
+    output = io.StringIO()
+    monkeypatch.setattr(BenchmarkRunner, 'run', run)
+    monkeypatch.setattr(cli.sys, 'stdout', output)
+    monkeypatch.setattr(cli.sys, 'stderr', None)
+    assert cli.main(['--warmup=0', '--duration=.03']) == expected
+    assert calls == ['single_core']
+    assert not output.getvalue()
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX file size limit')
