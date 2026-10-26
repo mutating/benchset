@@ -1,6 +1,12 @@
 //! Sustained scalar CPU throughput, available through Rust and a C ABI.
 mod ffi;
 mod kernel;
+mod reference;
+
+pub use reference::{
+    ReferenceBenchmarkResult, ReferenceMachine, ReferenceRun, PI_REFERENCE_MACHINE,
+    PI_REFERENCE_RUN,
+};
 
 use kernel::Kernel;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -38,8 +44,8 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            warmup: Duration::from_secs(120),
-            measurement: Duration::from_secs(60),
+            warmup: Duration::from_secs_f64(DEFAULT_WARMUP_SECONDS),
+            measurement: Duration::from_secs_f64(DEFAULT_MEASUREMENT_SECONDS),
         }
     }
 }
@@ -108,6 +114,12 @@ pub struct BenchmarkResult {
     pub samples: Vec<Sample>,
     pub variation_percent: Option<f64>,
     pub unstable: bool,
+    /// `score / benchmark.reference_score()`, using the same workload's Pi score.
+    /// Present for completed results, including unstable ones; otherwise `None`.
+    pub pi_equivalent: Option<f64>,
+    /// Shared calibration, available for every status and independent of this run.
+    pub reference_machine: &'static ReferenceMachine,
+    pub reference_run: &'static ReferenceRun,
 }
 
 impl BenchmarkResult {
@@ -127,6 +139,9 @@ impl BenchmarkResult {
             samples: Vec::new(),
             variation_percent: None,
             unstable: false,
+            pi_equivalent: None,
+            reference_machine: &PI_REFERENCE_MACHINE,
+            reference_run: &PI_REFERENCE_RUN,
         }
     }
 }
@@ -372,22 +387,13 @@ fn run_with(
     let mut last_sample_iterations = 0;
     loop {
         let now = Instant::now();
-        let phase = if now < times.warm_end {
-            Phase::Warmup
+        let warmup = now < times.warm_end;
+        let (phase, phase_start, phase_duration) = if warmup {
+            (Phase::Warmup, times.start, options.warmup)
         } else {
-            Phase::Measurement
+            (Phase::Measurement, times.warm_end, options.measurement)
         };
-        let phase_start = if phase == Phase::Warmup {
-            times.start
-        } else {
-            times.warm_end
-        };
-        let phase_duration = if phase == Phase::Warmup {
-            options.warmup
-        } else {
-            options.measurement
-        };
-        let iterations = sum(&counters, phase == Phase::Warmup);
+        let iterations = sum(&counters, warmup);
         if phase == Phase::Measurement {
             let elapsed = now.saturating_duration_since(times.warm_end).as_secs_f64();
             if elapsed - last_sample_elapsed >= 1.0 && now < times.end {
@@ -533,23 +539,32 @@ fn finish_result(result: &mut BenchmarkResult, panicked: bool, cancelled: bool) 
         result.reason = "measurement window was too short to complete any work".into();
     } else {
         result.status = Status::Completed;
-        result.score = Some(result.iterations as f64 / result.elapsed_seconds);
+        let score = result.iterations as f64 / result.elapsed_seconds;
+        result.score = Some(score);
+        result.pi_equivalent = Some(pi_equivalent(result.benchmark, score));
         if result.samples.len() >= 2 {
-            let mean = result.score.unwrap();
             let variance = result
                 .samples
                 .iter()
                 .map(|sample| {
-                    sample.duration_seconds * (sample.iterations_per_second - mean).powi(2)
+                    sample.duration_seconds * (sample.iterations_per_second - score).powi(2)
                 })
                 .sum::<f64>()
                 / result.elapsed_seconds;
-            result.variation_percent = Some(variance.sqrt() / mean * 100.0);
-            result.unstable = result.variation_percent.unwrap() > 10.0;
+            let variation_percent = variance.sqrt() / score * 100.0;
+            result.variation_percent = Some(variation_percent);
+            result.unstable = variation_percent > 10.0;
         }
     }
+}
+
+fn pi_equivalent(benchmark: Benchmark, score: f64) -> f64 {
+    score / benchmark.reference_score()
 }
 
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod reference_tests;

@@ -63,10 +63,12 @@ fn defaults_versions_and_layout() {
 fn nullable_arguments_and_getters_before_run_preserve_outputs() {
     unsafe {
         let h = Owned::new();
-        let mut r: CResult = std::mem::zeroed();
+        let mut r = CResult::default();
         r.status = 999;
-        let mut s: CSample = std::mem::zeroed();
-        s.iterations = 999;
+        let mut s = CSample {
+            iterations: 999,
+            ..CSample::default()
+        };
         assert_eq!(benchset_default_config(ptr::null_mut()), 0);
         assert_eq!(
             benchset_run(ptr::null_mut(), ptr::null(), None, ptr::null_mut()),
@@ -226,6 +228,71 @@ unsafe extern "C" fn callback(p: *const CProgress, user: *mut c_void) {
 }
 
 #[test]
+fn controlled_callback_preserves_every_progress_field() {
+    let phases = [
+        Phase::Warmup,
+        Phase::Measurement,
+        Phase::Completed,
+        Phase::Cancelled,
+        Phase::Failed,
+    ];
+    unsafe {
+        let h = Owned::new();
+        let mut context = Context {
+            handle: h.0,
+            thread: std::thread::current().id(),
+            same_thread: true,
+            events: vec![],
+            cancel: false,
+        };
+        assert_eq!(
+            execute(
+                h.0,
+                &config(),
+                Some(callback),
+                (&mut context as *mut Context).cast(),
+                &mut |benchmark, options, _, notify| {
+                    for phase in phases {
+                        notify(Progress {
+                            phase,
+                            workers: u32::MAX,
+                            fraction: 0.12345678901234567,
+                            phase_elapsed_seconds: 1.2345678901234567,
+                            phase_duration_seconds: 2.345678901234567,
+                            iterations: u64::MAX,
+                        });
+                    }
+                    BenchmarkResult::failed(benchmark, options, "test fixture".into())
+                },
+            ),
+            Status::Failed as u32
+        );
+        assert!(context.same_thread);
+        assert_eq!(context.events.len(), phases.len());
+        for (actual, expected_phase) in context.events.iter().zip([1, 2, 3, 4, 5]) {
+            assert_eq!(
+                (
+                    actual.phase,
+                    actual.workers,
+                    actual.fraction,
+                    actual.phase_elapsed_seconds,
+                    actual.phase_duration_seconds,
+                    actual.iterations,
+                ),
+                (
+                    expected_phase,
+                    u32::MAX,
+                    0.12345678901234567,
+                    1.2345678901234567,
+                    2.345678901234567,
+                    u64::MAX
+                )
+            );
+        }
+    }
+}
+
+#[test]
 fn live_callbacks_results_samples_precancel_and_single_use() {
     let _serial = crate::tests::TEST_LOCK.lock().unwrap();
     unsafe {
@@ -282,8 +349,10 @@ fn live_callbacks_results_samples_precancel_and_single_use() {
                 assert_eq!(benchset_run(h.0, &c, None, ptr::null_mut()), 2);
                 assert_eq!(result(h.0).status, status);
                 assert_eq!(benchset_reason(h.0), old_reason);
-                let mut sample: CSample = std::mem::zeroed();
-                sample.iterations = 999;
+                let mut sample = CSample {
+                    iterations: 999,
+                    ..CSample::default()
+                };
                 for index in [r.sample_count, u64::MAX] {
                     assert_eq!(benchset_sample(h.0, index, &mut sample), 0);
                 }
@@ -355,57 +424,96 @@ fn panic_boundary_create_and_poison_recovery() {
 #[test]
 fn complete_result_mapping_unicode_nul_and_large_unsigned_fields() {
     unsafe {
-        let h = Owned::new();
-        assert_eq!(
-            execute(
-                h.0,
-                &config(),
-                None,
-                ptr::null_mut(),
-                &mut |benchmark, options, _, _| {
-                    let mut r =
-                        BenchmarkResult::failed(benchmark, options, "проверка\0reason".into());
-                    r.status = Status::Completed;
-                    r.score = Some(123.5);
-                    r.workers = u32::MAX;
-                    r.elapsed_seconds = 4.0;
-                    r.iterations = u64::MAX;
-                    r.checksum = u64::MAX - 1;
-                    r.variation_percent = Some(10.5);
-                    r.unstable = true;
-                    r.samples = vec![Sample {
-                        elapsed_seconds: 4.0,
-                        duration_seconds: 3.0,
-                        iterations: u64::MAX,
-                        iterations_per_second: 123.5,
-                    }];
-                    r
+        for status in [Status::Completed, Status::Cancelled, Status::Failed] {
+            for variation in [None, Some(0.0), Some(12.345678901234567)] {
+                let h = Owned::new();
+                assert_eq!(
+                    execute(
+                        h.0,
+                        &config(),
+                        None,
+                        ptr::null_mut(),
+                        &mut |benchmark, options, _, _| {
+                            let mut r = BenchmarkResult::failed(
+                                benchmark,
+                                options,
+                                "проверка\0reason".into(),
+                            );
+                            r.status = status;
+                            r.score = if status == Status::Completed {
+                                Some(123.5)
+                            } else {
+                                None
+                            };
+                            r.workers = u32::MAX;
+                            r.elapsed_seconds = 4.0;
+                            r.iterations = u64::MAX;
+                            r.checksum = u64::MAX - 1;
+                            r.variation_percent = variation;
+                            r.unstable = true;
+                            r.samples = vec![
+                                Sample {
+                                    elapsed_seconds: 1.0,
+                                    duration_seconds: 1.0,
+                                    iterations: u64::MAX,
+                                    iterations_per_second: 42.123456789012345,
+                                },
+                                Sample {
+                                    elapsed_seconds: 4.0,
+                                    duration_seconds: 3.0,
+                                    iterations: 7,
+                                    iterations_per_second: 123.98765432109876,
+                                },
+                            ];
+                            r
+                        }
+                    ),
+                    status as u32
+                );
+                let r = result(h.0);
+                assert_eq!(r.status, status as u32);
+                assert_eq!(
+                    (r.workers, r.iterations, r.checksum),
+                    (u32::MAX, u64::MAX, u64::MAX - 1)
+                );
+                assert_eq!(
+                    (r.score, r.elapsed_seconds, r.variation_percent),
+                    (
+                        if status == Status::Completed {
+                            123.5
+                        } else {
+                            0.0
+                        },
+                        4.0,
+                        variation.unwrap_or(0.0)
+                    )
+                );
+                assert_eq!(
+                    (r.unstable, r.has_variation, r.sample_count),
+                    (1, u32::from(variation.is_some()), 2)
+                );
+                assert_eq!(reason(h.0), "проверка reason");
+                for (index, expected) in [
+                    (1.0, 1.0, u64::MAX, 42.123456789012345),
+                    (4.0, 3.0, 7, 123.98765432109876),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut out = MaybeUninit::uninit();
+                    assert_eq!(benchset_sample(h.0, index as u64, out.as_mut_ptr()), 1);
+                    let s = out.assume_init();
+                    assert_eq!(
+                        (
+                            s.elapsed_seconds,
+                            s.duration_seconds,
+                            s.iterations,
+                            s.iterations_per_second
+                        ),
+                        expected
+                    );
                 }
-            ),
-            0
-        );
-        let r = result(h.0);
-        assert_eq!(
-            (r.workers, r.iterations, r.checksum),
-            (u32::MAX, u64::MAX, u64::MAX - 1)
-        );
-        assert_eq!(
-            (r.score, r.elapsed_seconds, r.variation_percent),
-            (123.5, 4.0, 10.5)
-        );
-        assert_eq!((r.unstable, r.has_variation, r.sample_count), (1, 1, 1));
-        assert_eq!(reason(h.0), "проверка reason");
-        let mut out = MaybeUninit::uninit();
-        assert_eq!(benchset_sample(h.0, 0, out.as_mut_ptr()), 1);
-        let s = out.assume_init();
-        assert_eq!(
-            (
-                s.elapsed_seconds,
-                s.duration_seconds,
-                s.iterations,
-                s.iterations_per_second
-            ),
-            (4.0, 3.0, u64::MAX, 123.5)
-        );
+            }
+        }
     }
 }

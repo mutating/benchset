@@ -31,12 +31,15 @@ def main():
     staging.mkdir(parents=True, exist_ok=True)
     source = ROOT / 'target' / args.target / 'release'
     (staging / 'lib').mkdir(exist_ok=True)
-    for filename in ('libbenchset.a', 'benchset.lib', 'libbenchset.dylib', 'libbenchset.so', 'benchset.dll'):
+    for filename in ('libbenchset.a', 'benchset.lib', 'libbenchset.dylib', 'libbenchset.so',
+                     'benchset.dll', 'benchset.dll.lib'):
         if (source / filename).exists():
             shutil.copy2(source / filename, staging / 'lib' / filename)
     shutil.copytree(ROOT / 'include', staging / 'include', dirs_exist_ok=True)
     for filename in ('README.md', 'LICENSE'):
         shutil.copy2(ROOT / filename, staging / filename)
+    (staging / 'native').mkdir(exist_ok=True)
+    shutil.copy2(ROOT / 'native/reference-calibration.json', staging / 'native/reference-calibration.json')
     archive(staging, staging.parent / ('benchset-' + args.target + '.zip'))
     if not args.apple:
         return
@@ -70,6 +73,8 @@ def main():
     shutil.copytree(ROOT / 'Artifacts', swift_package / 'Artifacts', dirs_exist_ok=True)
     shutil.copy2(ROOT / 'README.md', swift_package / 'README.md')
     shutil.copy2(ROOT / 'LICENSE', swift_package / 'LICENSE')
+    (swift_package / 'native').mkdir(exist_ok=True)
+    shutil.copy2(ROOT / 'native/reference-calibration.json', swift_package / 'native/reference-calibration.json')
     archive(swift_package, swift_package.parent / 'Benchset-Swift.zip')
     archive(ROOT / 'Artifacts', swift_package.parent / 'Benchset.xcframework.zip')
 

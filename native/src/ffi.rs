@@ -1,9 +1,12 @@
-use crate::{run, Benchmark, BenchmarkResult, Cancellation, Options, Progress, Status};
+use crate::{
+    run, Benchmark, BenchmarkResult, Cancellation, Options, Progress, Status,
+    DEFAULT_MEASUREMENT_SECONDS, DEFAULT_WARMUP_SECONDS, PI_REFERENCE_MACHINE, PI_REFERENCE_RUN,
+};
 use std::ffi::{c_char, c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 const ABI_VERSION: u32 = 1;
@@ -30,6 +33,8 @@ pub struct CProgress {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Default))]
 pub struct CResult {
     pub abi_version: u32,
     pub status: u32,
@@ -47,7 +52,147 @@ pub struct CResult {
     pub has_variation: u32,
 }
 
+/// The original 88-byte result prefix stays binary-compatible.
 #[repr(C)]
+pub struct CResultV2 {
+    pub base: CResult,
+    pub pi_equivalent: f64,
+    pub has_pi_equivalent: u32,
+}
+
+#[repr(C)]
+pub struct CResultV3 {
+    pub base: CResultV2,
+    pub reference_machine: *const CReferenceMachine,
+    pub reference_run: *const CReferenceRun,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CReferenceMachine {
+    pub name: *const c_char,
+    pub short_name: *const c_char,
+    pub os_name: *const c_char,
+    pub os_version: *const c_char,
+    pub cpu_architecture: *const c_char,
+    pub memory_bytes: u64,
+    pub cpu_cores: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CReferenceRun {
+    pub started_at_unix_seconds: f64,
+    pub start_temperature_c: f64,
+    pub end_temperature_c: f64,
+    pub warmup_seconds: f64,
+    pub result_count: u64,
+}
+
+#[repr(C)]
+pub struct CReferenceBenchmarkResult {
+    pub benchmark: *const c_char,
+    pub score: f64,
+}
+
+struct ReferenceStrings {
+    machine: [CString; 5],
+    benchmarks: Vec<CString>,
+}
+
+fn reference_strings() -> &'static ReferenceStrings {
+    static STRINGS: OnceLock<ReferenceStrings> = OnceLock::new();
+    STRINGS.get_or_init(|| ReferenceStrings {
+        machine: [
+            PI_REFERENCE_MACHINE.name,
+            PI_REFERENCE_MACHINE.short_name,
+            PI_REFERENCE_MACHINE.os_name,
+            PI_REFERENCE_MACHINE.os_version,
+            PI_REFERENCE_MACHINE.cpu_architecture,
+        ]
+        .map(|value| CString::new(value).expect("reference strings contain no NUL")),
+        benchmarks: PI_REFERENCE_RUN
+            .results
+            .iter()
+            .map(|value| CString::new(value.benchmark).expect("reference names contain no NUL"))
+            .collect(),
+    })
+}
+
+struct ReferenceViews {
+    machine: CReferenceMachine,
+    run: CReferenceRun,
+}
+
+// All pointers borrow immutable strings in reference_strings() for the library's
+// lifetime. The views are initialized once and exposed only through const pointers.
+unsafe impl Send for ReferenceViews {}
+unsafe impl Sync for ReferenceViews {}
+
+fn reference_views() -> &'static ReferenceViews {
+    static VIEWS: OnceLock<ReferenceViews> = OnceLock::new();
+    VIEWS.get_or_init(|| {
+        let strings = &reference_strings().machine;
+        ReferenceViews {
+            machine: CReferenceMachine {
+                name: strings[0].as_ptr(),
+                short_name: strings[1].as_ptr(),
+                os_name: strings[2].as_ptr(),
+                os_version: strings[3].as_ptr(),
+                cpu_architecture: strings[4].as_ptr(),
+                memory_bytes: PI_REFERENCE_MACHINE.memory_bytes,
+                cpu_cores: PI_REFERENCE_MACHINE.cpu_cores,
+            },
+            run: CReferenceRun {
+                started_at_unix_seconds: PI_REFERENCE_RUN.started_at_unix_seconds,
+                start_temperature_c: PI_REFERENCE_RUN.start_temperature_c,
+                end_temperature_c: PI_REFERENCE_RUN.end_temperature_c,
+                warmup_seconds: PI_REFERENCE_RUN.warmup_seconds,
+                result_count: PI_REFERENCE_RUN.results.len() as u64,
+            },
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn benchset_reference_machine(out: *mut CReferenceMachine, size: u32) -> i32 {
+    if out.is_null() || size as usize != std::mem::size_of::<CReferenceMachine>() {
+        return 0;
+    }
+    out.write(reference_views().machine);
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn benchset_reference_run(out: *mut CReferenceRun, size: u32) -> i32 {
+    if out.is_null() || size as usize != std::mem::size_of::<CReferenceRun>() {
+        return 0;
+    }
+    out.write(reference_views().run);
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn benchset_reference_result(
+    index: u64,
+    out: *mut CReferenceBenchmarkResult,
+    size: u32,
+) -> i32 {
+    if out.is_null()
+        || size as usize != std::mem::size_of::<CReferenceBenchmarkResult>()
+        || index >= PI_REFERENCE_RUN.results.len() as u64
+    {
+        return 0;
+    }
+    out.write(CReferenceBenchmarkResult {
+        benchmark: reference_strings().benchmarks[index as usize].as_ptr(),
+        score: PI_REFERENCE_RUN.results[index as usize].score,
+    });
+    1
+}
+
+#[repr(C)]
+#[cfg_attr(test, derive(Default))]
 pub struct CSample {
     pub elapsed_seconds: f64,
     pub duration_seconds: f64,
@@ -88,8 +233,8 @@ pub unsafe extern "C" fn benchset_default_config(out: *mut Config) -> i32 {
         struct_size: std::mem::size_of::<Config>() as u32,
         benchmark: 1,
         reserved: 0,
-        warmup_seconds: 120.0,
-        measurement_seconds: 60.0,
+        warmup_seconds: DEFAULT_WARMUP_SECONDS,
+        measurement_seconds: DEFAULT_MEASUREMENT_SECONDS,
     });
     1
 }
@@ -232,7 +377,12 @@ pub unsafe extern "C" fn benchset_result(handle: *const Handle, out: *mut CResul
         Some(stored) => &stored.result,
         None => return 0,
     };
-    out.write(CResult {
+    out.write(legacy_result(result));
+    1
+}
+
+fn legacy_result(result: &BenchmarkResult) -> CResult {
+    CResult {
         abi_version: ABI_VERSION,
         status: result.status as u32,
         benchmark: result.benchmark as u32,
@@ -247,6 +397,54 @@ pub unsafe extern "C" fn benchset_result(handle: *const Handle, out: *mut CResul
         sample_count: result.samples.len() as u64,
         unstable: u32::from(result.unstable),
         has_variation: u32::from(result.variation_percent.is_some()),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn benchset_result_v2(
+    handle: *const Handle,
+    out: *mut CResultV2,
+    size: u32,
+) -> i32 {
+    if handle.is_null() || out.is_null() || size as usize != std::mem::size_of::<CResultV2>() {
+        return 0;
+    }
+    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let result = match &*stored {
+        Some(stored) => &stored.result,
+        None => return 0,
+    };
+    out.write(extended_result(result));
+    1
+}
+
+fn extended_result(result: &BenchmarkResult) -> CResultV2 {
+    CResultV2 {
+        base: legacy_result(result),
+        pi_equivalent: result.pi_equivalent.unwrap_or(0.0),
+        has_pi_equivalent: u32::from(result.pi_equivalent.is_some()),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn benchset_result_v3(
+    handle: *const Handle,
+    out: *mut CResultV3,
+    size: u32,
+) -> i32 {
+    if handle.is_null() || out.is_null() || size as usize != std::mem::size_of::<CResultV3>() {
+        return 0;
+    }
+    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let result = match &*stored {
+        Some(stored) => &stored.result,
+        None => return 0,
+    };
+    let views = reference_views();
+    out.write(CResultV3 {
+        base: extended_result(result),
+        reference_machine: &views.machine,
+        reference_run: &views.run,
     });
     1
 }
@@ -261,13 +459,11 @@ pub unsafe extern "C" fn benchset_sample(
         return 0;
     }
     let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
-    let sample = match &*stored {
-        Some(stored) => stored.result.samples.get(index as usize),
-        None => None,
-    };
-    let sample = match sample {
-        Some(sample) => sample,
-        None => return 0,
+    let Some(sample) = stored
+        .as_ref()
+        .and_then(|stored| stored.result.samples.get(index as usize))
+    else {
+        return 0;
     };
     out.write(CSample {
         elapsed_seconds: sample.elapsed_seconds,
@@ -300,3 +496,7 @@ pub unsafe extern "C" fn benchset_free(handle: *mut Handle) {
 #[cfg(test)]
 #[path = "ffi_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ffi_reference_tests.rs"]
+mod reference_tests;
