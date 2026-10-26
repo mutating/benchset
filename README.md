@@ -313,8 +313,10 @@ Rust/Swift dependency pins below are generated copies. `benchset.__version__`
 and result objects read installed Python package metadata through
 `importlib.metadata`; no Python source version constant needs updating.
 Rust, C and Swift read the version compiled from the generated Cargo metadata.
-Builds and CI reject inconsistent copies. Consumers decide which versions and
-measurement settings are comparable.
+Python builds (including metadata, sdist, wheel and editable hooks),
+`scripts/build_native.py` and `scripts/package_native.py` automatically refresh
+these copies before building. Consumers decide which versions and measurement
+settings are comparable.
 
 ## Embed in Rust
 
@@ -545,16 +547,21 @@ All distributions are released from this repository by
 `.github/workflows/release.yml`. A push to `main` checks the common package
 version. An unreleased version is built and published automatically; a version
 whose managed GitHub Release is already published is skipped. To release a new
-version, run `python scripts/version.py 0.0.4` with the desired `X.Y.Z` version.
-It updates the canonical `pyproject.toml` value and synchronizes version values
-in the Cargo manifest, lockfile entry and README dependency pins. Alternatively, edit
-only `pyproject.toml` and run `python scripts/version.py` to refresh those copies.
-Commit the resulting changes and push to `main`. CI and Python/release builds
-reject stale copies with instructions to synchronize them. Run
-`python scripts/version.py --check` for the same read-only check locally. Cargo
-requires its own manifest version, so these generated copies stay committed for
-ordinary `cargo build`/`cargo package` without requiring Python. Do not create or
-move release tags manually.
+version, change only `[project].version` in `pyproject.toml`, commit it and push
+to `main`. Use an `X.Y.Z` version. Builds automatically synchronize the Cargo
+manifest, lockfile entry and README dependency pins; no separate version command
+is needed. The prepared release commit freezes those generated values for all
+published source archives and tags. `python scripts/version.py --check` remains
+an optional diagnostic; it does not have to pass on an unbuilt checkout after a
+version edit.
+
+For a local native build after editing the version, use
+`python scripts/build_native.py`; for native/Swift archives use
+`python scripts/package_native.py --target <target>` (add `--apple` for the
+universal Swift package). Cargo reads its package version before `build.rs`
+runs, so direct `cargo build`/`cargo package` use the already-generated manifest.
+Published crates contain that manifest and still build without Python. Do not
+create or move release tags manually.
 
 The workflow performs these steps:
 
@@ -565,8 +572,9 @@ The workflow performs these steps:
    the Linux containers; update the pin and package version together when
    changing the release toolchain.
 3. Compute the XCFramework archive checksum and create a detached release
-   commit that changes only `Package.swift`. Its parent is the tested source
-   commit. `main` keeps its local development manifest.
+   commit containing generated version values and `Package.swift`. Its parent
+   is the tested canonical source commit; unrelated source changes are rejected.
+   `main` keeps its local development manifest.
 4. Build the sdist and crate from that exact release commit, then retain the
    complete, checksummed release bundle as a GitHub Actions artifact.
 5. Push `v<version>` at the prepared commit and populate a draft GitHub Release

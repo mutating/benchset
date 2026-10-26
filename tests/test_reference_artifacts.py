@@ -428,12 +428,10 @@ def test_installed_api_check_visits_both_workloads_and_accepts_only_exact_no_wor
     assert calls == ['single_core', 'multi_core']
 
 
-def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
-    source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path,
-) -> None:
+@pytest.fixture
+def bumped_source_snapshot(source_snapshot: Path, tmp_path: Path) -> Path:
     from scripts.version import read_version  # noqa: PLC0415
 
-    environment, _cargo, _target = rust_tools
     versioned_source = tmp_path / 'versioned-source'
     shutil.copytree(source_snapshot, versioned_source, ignore=shutil.ignore_patterns('target', 'build', 'dist'))
     configuration = versioned_source / 'pyproject.toml'
@@ -442,11 +440,64 @@ def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
     configuration.write_text(configuration.read_text(encoding='utf-8').replace(
         'version = "' + original_version + '"', 'version = "9.8.7"', 1,
     ), encoding='utf-8')
-    execute([sys.executable, 'scripts/version.py'], versioned_source, environment)
-    execute([sys.executable, 'scripts/version.py', '--check'], versioned_source, environment)
+    return versioned_source
+
+
+@pytest.mark.parametrize('hook', [
+    'get_requires_for_build_sdist', 'prepare_metadata_for_build_wheel', 'prepare_metadata_for_build_editable',
+])
+def test_python_build_hooks_synchronize_versions_before_metadata(
+    bumped_source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path, hook: str,
+) -> None:
+    from scripts.version import sync_version  # noqa: PLC0415
+
+    environment, _cargo, _target = rust_tools
+    metadata = tmp_path / 'metadata'
+    metadata.mkdir()
+    program = 'from scripts import build_backend; build_backend.' + hook
+    program += '(' + repr(str(metadata)) + ')' if hook.startswith('prepare_') else '()'
+    execute([sys.executable, '-c', program], bumped_source_snapshot, environment)
+    assert sync_version(bumped_source_snapshot, check=True) == '9.8.7'
+    if hook.startswith('prepare_'):
+        description = next(metadata.glob('*.dist-info/METADATA')).read_text(encoding='utf-8')
+        assert '\nVersion: 9.8.7\n' in description
+
+
+@pytest.mark.parametrize('script', ['build_native.py', 'package_native.py'])
+def test_native_build_entrypoints_synchronize_before_invoking_cargo(
+    bumped_source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], script: str,
+) -> None:
+    from scripts.version import sync_version  # noqa: PLC0415
+
+    environment, _cargo, target = rust_tools
+    command = [sys.executable, 'scripts/' + script]
+    if script == 'package_native.py':
+        command.extend(['--target', target])
+        if sys.platform == 'darwin':
+            command.append('--apple')
+    execute(command, bumped_source_snapshot, environment)
+    assert sync_version(bumped_source_snapshot, check=True) == '9.8.7'
+    filename = 'benchset.dll' if sys.platform == 'win32' else (
+        'libbenchset.dylib' if sys.platform == 'darwin' else 'libbenchset.so'
+    )
+    library = bumped_source_snapshot / (
+        'benchset/_native' if script == 'build_native.py' else 'release-artifacts/' + target + '/lib'
+    ) / filename
+    program = ('import ctypes; lib = ctypes.CDLL(' + repr(str(library)) + '); '
+               'lib.benchset_version.restype = ctypes.c_char_p; assert lib.benchset_version() == b"9.8.7"')
+    execute([sys.executable, '-c', program], bumped_source_snapshot, environment)
+    if script == 'package_native.py' and sys.platform == 'darwin':
+        with zipfile.ZipFile(bumped_source_snapshot / 'release-artifacts/Benchset-Swift.zip') as archive:
+            assert '.exact("9.8.7")' in archive.read('README.md').decode('utf-8')
+
+
+def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
+    bumped_source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path,
+) -> None:
+    environment, _cargo, _target = rust_tools
     sdists = tmp_path / 'sdists'
     execute([sys.executable, '-m', 'build', '--sdist', '--outdir', str(sdists)],
-            versioned_source, environment)
+            bumped_source_snapshot, environment)
     archive = next(sdists.glob('*.tar.gz'))
     assert archive.name == 'benchset-9.8.7.tar.gz'
     unpacked = tmp_path / 'unpacked'
@@ -482,6 +533,27 @@ def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
                                 encoding='utf-8', check=False, timeout=300)
         verify_cli(result.stdout, result.stderr, result.returncode)
     execute([str(python), '-m', 'pip', 'check'], consumer, environment)
+
+
+def test_editable_install_builds_the_native_version_from_pyproject(
+    bumped_source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path,
+) -> None:
+    environment, _cargo, _target = rust_tools
+    virtualenv = tmp_path / 'editable-venv'
+    venv.EnvBuilder(with_pip=True, symlinks=os.name != 'nt').create(virtualenv)
+    python = virtualenv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    for expected_version in ('9.8.7', '9.8.8'):
+        if expected_version == '9.8.8':
+            configuration = bumped_source_snapshot / 'pyproject.toml'
+            configuration.write_text(configuration.read_text(encoding='utf-8').replace(
+                'version = "9.8.7"', 'version = "9.8.8"', 1,
+            ), encoding='utf-8')
+        execute([str(python), '-m', 'pip', 'install', '--editable', str(bumped_source_snapshot)], tmp_path, environment)
+        execute([str(python), '-c', '''
+from benchset import __version__
+from benchset._native import Native
+assert __version__ == ''' + repr(expected_version) + '''
+assert Native().lib.benchset_version() == ''' + repr(expected_version.encode('ascii')) + '\n'], tmp_path, environment)
 
 
 @pytest.fixture(scope='module')

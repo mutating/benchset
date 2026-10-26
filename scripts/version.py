@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -70,9 +71,21 @@ def sync_version(root: Path, new_version: Optional[str] = None, *, check: bool =
         names = ', '.join(path.name for path in changes)
         raise ValueError('Generated versions must match project.version: ' + names
                          + '; run python scripts/version.py')
-    # Validate every replacement before touching even the canonical source.
-    for path, text in changes.items():
-        path.write_text(text, encoding='utf-8')
+    # Stage every complete file first. Concurrent build readers must never see
+    # a truncated manifest, and a failed write must leave the sources intact.
+    staged = {}
+    try:
+        for path, text in changes.items():
+            with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                staged[path] = temporary
+                stream.write(text)
+            temporary.chmod(path.stat().st_mode & 0o777)
+        for path, temporary in staged.items():
+            temporary.replace(path)
+    finally:
+        for temporary in staged.values():
+            temporary.unlink(missing_ok=True)
     return value
 
 

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -43,12 +45,14 @@ def contents(root: Path) -> dict[str, bytes]:
 def test_only_pyproject_controls_the_version(project: Path) -> None:
     assert read_version(project) == '1.2.3'
     before = contents(project)
+    modes = {path.name: path.stat().st_mode for path in project.iterdir()}
     assert sync_version(project) == '1.2.3'
     after = contents(project)
     assert after['pyproject.toml'] == before['pyproject.toml']
     assert after['Cargo.toml'] == before['Cargo.toml'].replace(b'0.0.0', b'1.2.3')
     assert after['Cargo.lock'] == before['Cargo.lock'].replace(b'0.0.0', b'1.2.3')
     assert after['README.md'] == before['README.md'].replace(b'0.0.0', b'1.2.3')
+    assert {path.name: path.stat().st_mode for path in project.iterdir()} == modes
     times = {path.name: path.stat().st_mtime_ns for path in project.iterdir()}
     assert sync_version(project, check=True) == '1.2.3'
     assert sync_version(project) == '1.2.3'
@@ -123,6 +127,27 @@ def test_check_cannot_change_the_source(project: Path) -> None:
     before = contents(project)
     with pytest.raises(ValueError, match='--check'):
         sync_version(project, '2.0.0', check=True)
+    assert contents(project) == before
+
+
+def test_failed_generated_write_leaves_the_source_and_copies_intact(
+    project: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = contents(project)
+    original_open = io.open
+    writes = 0
+
+    def open_file(file: Any, mode: str = 'r', *args: Any, **kwargs: Any) -> Any:
+        nonlocal writes
+        if 'w' in mode:
+            writes += 1
+            if writes == 2:
+                raise OSError(28, 'No space left on device')
+        return original_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(io, 'open', open_file)
+    with pytest.raises(OSError, match='No space left'):
+        sync_version(project, '2.0.0')
     assert contents(project) == before
 
 

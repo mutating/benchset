@@ -158,7 +158,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.1
         with:
           targets: ${{ matrix.target }}
-      - run: cargo test --locked -- --test-threads=1
+      - name: Test Rust core with the generated package version
+        run: |
+          python scripts/version.py
+          cargo test --locked -- --test-threads=1
       - name: Package platform libraries
         if: runner.os != 'Linux'
         run: python scripts/package_native.py --target ${{ matrix.target }}
@@ -205,7 +208,7 @@ jobs:
         with:
           pattern: native-*
           path: target/build-artifacts/native
-      - name: Generate the Swift manifest and detached release commit
+      - name: Freeze generated versions and Swift manifest in the detached release commit
         id: prepare
         run: python scripts/release.py prepare --artifacts target/build-artifacts --output target/prepared
       - uses: actions/upload-artifact@v4

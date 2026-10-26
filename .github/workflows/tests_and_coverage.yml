@@ -4,24 +4,19 @@ on:
   push
 
 jobs:
-  versions:
-    name: Generated package versions
+  rust_msrv:
+    name: Rust minimum supported version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python scripts/version.py --check
-
-  rust_msrv:
-    name: Rust minimum supported version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.74.0
       - name: Check the library and public Rust consumer on Rust 1.74
-        run: cargo +1.74.0 check --lib --example rust --locked
+        run: |
+          python scripts/version.py
+          cargo +1.74.0 check --lib --example rust --locked
 
   build:
 
@@ -50,9 +45,6 @@ jobs:
 
     - uses: dtolnay/rust-toolchain@1.94.1
 
-    - name: Test Rust core
-      run: cargo test -- --test-threads=1
-
     - name: Set up uv
       uses: astral-sh/setup-uv@v7
       with:
@@ -68,6 +60,9 @@ jobs:
 
     - name: Build native library for source tests
       run: python scripts/build_native.py
+
+    - name: Test Rust core with the generated package version
+      run: cargo test --locked -- --test-threads=1
 
     - name: Print all libs
       shell: bash

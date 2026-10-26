@@ -137,10 +137,9 @@ def test_release_snapshot_preserves_main_and_can_be_checked_out(source: Path) ->
     assert release.git(source, 'rev-parse', 'HEAD') == metadata['release_sha']
 
 
-def test_freeze_requires_consistent_versions_and_clean_source(source: Path) -> None:
+def test_release_planning_uses_only_canonical_version_and_preparation_requires_clean_source(source: Path) -> None:
     (source / 'Cargo.toml').write_text('[package]\nversion = "0.0.2"\n')
-    with pytest.raises(ValueError, match='versions must match'):
-        release.version(source)
+    assert release.version(source) == VERSION
     with pytest.raises(ValueError, match='clean Git checkout'):
         release.prepare(source, artifacts(source), source / 'target/prepared', REPOSITORY, '123')
 
@@ -152,10 +151,71 @@ def test_incomplete_platform_matrix_is_rejected(source: Path) -> None:
         release.prepare(source, incoming, source / 'target/prepared', REPOSITORY, '123')
 
 
-def test_stale_lockfile_is_rejected(source: Path) -> None:
+def test_planning_does_not_require_a_manually_synchronized_lockfile(source: Path) -> None:
     (source / 'Cargo.lock').write_text('[[package]]\nname = "benchset"\nversion = "0.0.0"\n')
-    with pytest.raises(ValueError, match=r'python scripts/version\.py'):
-        release.version(source)
+    before = (source / 'Cargo.lock').read_bytes()
+    assert release.version(source) == VERSION
+    assert (source / 'Cargo.lock').read_bytes() == before
+
+
+@pytest.fixture
+def prepared_bump(source: Path) -> Path:
+    (source / 'Cargo.lock').write_text('version = 3\n[[package]]\nname = "benchset"\nversion = "0.0.1"\n')
+    (source / 'README.md').write_text('benchset = "0.0.1"\n.package(url: "example", .exact("0.0.1"))\n')
+    release.git(source, 'add', 'Cargo.lock', 'README.md')
+    release.git(source, 'commit', '-m', 'Add generated metadata')
+    (source / 'pyproject.toml').write_text('[project]\nversion = "0.0.2"\n')
+    release.git(source, 'add', 'pyproject.toml')
+    release.git(source, 'commit', '-m', 'Change only canonical project version')
+    incoming = artifacts(source)
+    for wheel in incoming.glob('*.whl'):
+        wheel.rename(wheel.with_name(wheel.name.replace('0.0.1', '0.0.2')))
+    destination = source / 'target/prepared'
+    release.prepare(source, incoming, destination, REPOSITORY, '123')
+    return destination
+
+
+def test_release_snapshot_generates_versions_from_a_pyproject_only_commit(source: Path, prepared_bump: Path) -> None:
+    metadata = release.read_metadata(prepared_bump)
+    source_sha = metadata['source_sha']
+    assert metadata['version'] == '0.0.2'
+    assert release.git(source, 'rev-parse', 'main') == source_sha
+    assert set(release.git(source, 'diff', '--name-only', source_sha, metadata['release_sha']).splitlines()) == {
+        'Cargo.toml', 'Cargo.lock', 'README.md', 'Package.swift',
+    }
+    assert 'version = "0.0.1"' in release.git(source, 'show', source_sha + ':Cargo.toml')
+    release.git(source, 'checkout', '--detach', source_sha)
+    release.checkout(source, prepared_bump, '0.0.2', REPOSITORY, source_sha)
+    assert 'version = "0.0.2"' in (source / 'Cargo.toml').read_text()
+    assert 'version = "0.0.2"' in (source / 'Cargo.lock').read_text()
+    assert 'benchset = "0.0.2"' in (source / 'README.md').read_text()
+    assert not release.git(source, 'status', '--porcelain', '--untracked-files=no')
+
+
+@pytest.mark.parametrize(('filename', 'mode_only'), [
+    ('Cargo.toml', False), ('Cargo.lock', False), ('README.md', False), ('unexpected.txt', False),
+    ('Cargo.toml', True),
+])
+def test_release_snapshot_rejects_changes_beyond_exact_generated_values(
+    source: Path, prepared_bump: Path, filename: str, mode_only: bool,
+) -> None:
+    metadata = release.read_metadata(prepared_bump)
+    if mode_only:
+        release.git(source, 'update-index', '--chmod=+x', '--', filename)
+    else:
+        path = source / filename
+        path.write_text((path.read_text() if path.exists() else '') + '\n# unrelated change\n')
+        release.git(source, 'add', filename)
+    release.git(source, 'commit', '--amend', '--no-edit')
+    metadata['release_sha'] = release.git(source, 'rev-parse', 'HEAD')
+    release.git(source, 'update-ref', release.BUNDLE_REF, metadata['release_sha'])
+    bundle = prepared_bump / 'source.bundle'
+    bundle.unlink()
+    release.git(source, 'bundle', 'create', str(bundle), release.BUNDLE_REF, '^' + metadata['source_sha'])
+    metadata['source_bundle_sha256'] = release.digest(bundle)
+    release.save(prepared_bump / release.PREPARED, metadata)
+    with pytest.raises(ValueError, match='unexpected source changes'):
+        release.checkout(source, prepared_bump, '0.0.2', REPOSITORY, metadata['source_sha'])
 
 
 def test_checksum_manifest_tampering_is_rejected(source: Path) -> None:

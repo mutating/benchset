@@ -11,6 +11,11 @@ import sys
 import zipfile
 from pathlib import Path
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.version import sync_version
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -26,6 +31,7 @@ def main():
     parser.add_argument('--target', required=True)
     parser.add_argument('--apple', action='store_true')
     args = parser.parse_args()
+    sync_version(ROOT)
     subprocess.run(['cargo', 'build', '--release', '--locked', '--target', args.target], cwd=ROOT, check=True)
     staging = ROOT / 'release-artifacts' / args.target
     staging.mkdir(parents=True, exist_ok=True)

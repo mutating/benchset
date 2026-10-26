@@ -14,6 +14,7 @@ from scripts.build_backend import rust_environment
 from scripts.version import sync_version
 
 ROOT = Path(__file__).parent.resolve()
+sync_version(ROOT)
 
 
 def rust_target():
@@ -58,7 +59,8 @@ class BuildNative(build_py):
         filename = 'benchset.dll' if sys.platform == 'win32' else (
             'libbenchset.dylib' if sys.platform == 'darwin' else 'libbenchset.so'
         )
-        destination = Path(self.build_lib) / 'benchset' / '_native'
+        package = ROOT / 'benchset' if self.editable_mode else Path(self.build_lib) / 'benchset'
+        destination = package / '_native'
         destination.mkdir(parents=True, exist_ok=True)
         for old in destination.iterdir():
             if old.suffix in ('.so', '.dll', '.dylib'):

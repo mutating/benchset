@@ -2,7 +2,7 @@
 
 Only the ``stage`` command writes to GitHub. Other commands work locally or
 read registry metadata. CI checks out a clean, detached source commit before
-preparing the snapshot; the release commit changes only Package.swift.
+preparing the snapshot; the release commit freezes generated versions and Package.swift.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -23,7 +24,7 @@ from typing import Any
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.version import sync_version
+from scripts.version import read_version, sync_version
 
 NATIVE_TARGETS = (
     'aarch64-apple-darwin', 'x86_64-apple-darwin',
@@ -33,6 +34,7 @@ NATIVE_TARGETS = (
 BUNDLE_REF = 'refs/heads/benchset-prepared'
 MANIFEST = 'release-manifest.json'
 PREPARED = 'release-plan.json'
+VERSION_FILES = ('Cargo.toml', 'Cargo.lock', 'README.md')
 
 
 def git(root: Path, *arguments: str) -> str:
@@ -40,7 +42,7 @@ def git(root: Path, *arguments: str) -> str:
 
 
 def version(root: Path) -> str:
-    return sync_version(root, check=True)
+    return read_version(root)
 
 
 def digest(path: Path) -> str:
@@ -186,14 +188,16 @@ def prepare(root: Path, artifacts: Path, destination: Path, repository: str, run
     validate_native_files(destination, package_version)
     checksum = digest(destination / 'Benchset.xcframework.zip')
     git(root, 'checkout', '--detach', source_sha)
+    sync_version(root)
     manifest = root / 'Package.swift'
     manifest.write_text(swift_manifest(manifest.read_text(), repository, package_version, checksum))
-    git(root, 'add', 'Package.swift')
+    release_files = ['Package.swift', *(name for name in VERSION_FILES if (root / name).exists())]
+    git(root, 'add', *release_files)
     message = ('Prepare benchset ' + package_version + '\n\nBenchset-Source: ' + source_sha
                + '\nBenchset-Run: ' + run_id)
     git(root, '-c', 'user.name=github-actions[bot]', '-c',
         'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-        '-c', 'commit.gpgsign=false', 'commit', '-m', message, '--', 'Package.swift')
+        '-c', 'commit.gpgsign=false', 'commit', '-m', message, '--', *release_files)
     release_sha = git(root, 'rev-parse', 'HEAD')
     git(root, 'update-ref', BUNDLE_REF, release_sha)
     git(root, 'bundle', 'create', str((destination / 'source.bundle').resolve()), BUNDLE_REF, '^' + source_sha)
@@ -245,8 +249,25 @@ def checkout(root: Path, directory: Path, expected_version: str, repository: str
         raise ValueError('Unexpected release commit in the source bundle')
     if git(root, 'rev-parse', release_sha + '^') != source_sha:
         raise ValueError('Unexpected release source parent')
-    if git(root, 'diff', '--name-only', source_sha, release_sha) != 'Package.swift':
-        raise ValueError('Release commit must change only Package.swift')
+    source_files = set(git(root, 'ls-tree', '-r', '--name-only', source_sha).splitlines())
+    generated_files = [name for name in VERSION_FILES if name in source_files]
+    changes = set(git(root, 'diff', '--name-only', source_sha, release_sha).splitlines())
+    allowed = {'Package.swift', *generated_files}
+    if (not changes <= allowed
+            or git(root, 'diff', '--summary', source_sha, release_sha, '--', *sorted(allowed))):
+        raise ValueError('Release commit contains unexpected source changes')
+    # Recompute the allowed edits from the immutable source, rather than trusting
+    # arbitrary changes anywhere in a generated manifest or its documentation.
+    with tempfile.TemporaryDirectory(prefix='benchset-release-versions-') as temporary:
+        original = Path(temporary)
+        for name in ('pyproject.toml', *generated_files):
+            text = subprocess.check_output(['git', 'show', source_sha + ':' + name], cwd=root, encoding='utf-8')
+            (original / name).write_text(text, encoding='utf-8')
+        sync_version(original)
+        for name in generated_files:
+            text = subprocess.check_output(['git', 'show', release_sha + ':' + name], cwd=root, encoding='utf-8')
+            if text != (original / name).read_text(encoding='utf-8'):
+                raise ValueError('Release commit contains unexpected source changes: ' + name)
     git(root, 'checkout', '--detach', release_sha)
     source_manifest = git(root, 'show', source_sha + ':Package.swift') + '\n'
     if (root / 'Package.swift').read_text() != swift_manifest(
@@ -255,6 +276,7 @@ def checkout(root: Path, directory: Path, expected_version: str, repository: str
         raise ValueError('Release Swift manifest does not match its artifact')
     if version(root) != expected_version:
         raise ValueError('Release source version mismatch')
+    sync_version(root, check=True)
 
 
 def assemble(prepared: Path, sources: Path, destination: Path) -> None:
