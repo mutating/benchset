@@ -63,8 +63,10 @@ fn defaults_versions_and_layout() {
 fn nullable_arguments_and_getters_before_run_preserve_outputs() {
     unsafe {
         let h = Owned::new();
-        let mut r = CResult::default();
-        r.status = 999;
+        let mut r = CResult {
+            status: 999,
+            ..CResult::default()
+        };
         let mut s = CSample {
             iterations: 999,
             ..CSample::default()

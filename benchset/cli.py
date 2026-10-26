@@ -137,9 +137,12 @@ def render(result: BenchmarkResult, stream: TextIO) -> None:
 class _Progress:
     def __init__(self) -> None:
         self.width = 0
+        # A disconnected PTY can stop reporting itself as a terminal. Keep
+        # writing progress so the I/O error cancels the native run promptly.
+        self.terminal = sys.stdout.isatty()
 
     def __call__(self, value: Progress) -> None:
-        if sys.stdout.isatty():
+        if self.terminal:
             limit = max(1, shutil.get_terminal_size().columns - 1)
             percent = f'{value.fraction * 100:5.1f}%'
             label = f'{value.benchmark}: {value.phase}'

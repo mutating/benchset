@@ -26,11 +26,6 @@ jobs:
       with:
         components: rustfmt, clippy
 
-    - name: Check Rust
-      run: |
-        cargo fmt --check
-        cargo clippy --all-targets -- -D warnings
-
     - name: Set up uv
       uses: astral-sh/setup-uv@v7
       with:
@@ -43,6 +38,11 @@ jobs:
     - name: Install the library
       shell: bash
       run: uv pip install --system .
+
+    - name: Check Rust with the generated package version
+      run: |
+        cargo fmt --check
+        cargo clippy --all-targets -- -D warnings
 
     - name: Run ruff
       shell: bash

@@ -458,6 +458,32 @@ def test_persistent_terminal_write_failure_is_reported_without_escaping(
     assert 'terminal disconnected' in capsys.readouterr().err
 
 
+@pytest.mark.parametrize('before_first_frame', [False, True])
+def test_progress_reports_a_terminal_disconnect_even_when_isatty_becomes_false(
+    monkeypatch: pytest.MonkeyPatch, before_first_frame: bool,
+) -> None:
+    class Terminal(io.StringIO):
+        connected = True
+
+        def isatty(self) -> bool:
+            return self.connected
+
+        def write(self, text: str) -> int:
+            if not self.connected:
+                raise OSError('terminal disconnected')
+            return super().write(text)
+
+    terminal = Terminal()
+    monkeypatch.setattr(cli.sys, 'stdout', terminal)
+    progress = cli._Progress()
+    frame = Progress('single_core', 'measurement', 1, 0.5, 1, 2, 8)
+    if not before_first_frame:
+        progress(frame)
+    terminal.connected = False
+    with pytest.raises(OSError, match='terminal disconnected'):
+        progress(frame)
+
+
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX PTY disconnection')
 def test_real_terminal_disconnect_has_execution_failure_exit_without_traceback(
     invocation: Tuple[List[str], Dict[str, str]],
