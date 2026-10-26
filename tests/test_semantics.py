@@ -9,7 +9,7 @@ import sys
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from threading import Event, Thread, get_ident
-from typing import Any, Callable, List, Optional, Type
+from typing import Any, Callable, List, Optional, Tuple, Type
 
 import pytest
 
@@ -24,14 +24,15 @@ from benchset import (
     run_all,
 )
 from benchset._native import (
-    ABI_VERSION,
     Callback,
     Config,
     CProgress,
     CResult,
+    CResultV2,
     CSample,
     Native,
 )
+from tests.helpers import assert_result_references, assert_runner_reusable
 
 
 def test_model_and_result_versions_come_from_package_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,8 +66,10 @@ def test_python_validation_does_not_allocate_native(
         pytest.fail('invalid options must not load native code')
     monkeypatch.setattr(api, 'Native', forbidden)
     result = run('single_core', warmup_seconds=warmup, measurement_seconds=measurement)
+    assert_result_references(result)
     assert result.status == 'failed'
     assert result.score is None
+    assert result.pi_equivalent is None
     assert result.reason
     if math.isnan(warmup):
         assert math.isnan(result.warmup_seconds)
@@ -81,8 +84,10 @@ def test_python_validation_does_not_allocate_native(
 @pytest.mark.parametrize(('warmup', 'measurement'), [(sys.float_info.max, 1), (0, sys.float_info.max), (0, 1e-12)])
 def test_native_duration_limits_preserve_requested_diagnostics(warmup: float, measurement: float) -> None:
     result = run('single_core', warmup_seconds=warmup, measurement_seconds=measurement)
+    assert_result_references(result)
     assert result.status == 'failed'
     assert result.score is None
+    assert result.pi_equivalent is None
     assert result.warmup_seconds == warmup
     assert result.measurement_seconds == measurement
     assert result.reason
@@ -108,9 +113,11 @@ def test_callback_base_exceptions_stop_notifications_and_allow_reuse(
             raise error_type('callback boundary')
 
     result = runner.run('single_core', warmup_seconds=0.02, measurement_seconds=0.04, on_progress=callback)
+    assert_result_references(result)
     assert result.status == 'failed'
     assert result.score is None
     assert result.reason == f'progress callback failed: {error_type.__name__}: callback boundary'
+    assert result.pi_equivalent is None
     assert events[-1].phase == phase
     assert sum(event.phase == phase for event in events) == 1
     assert library.cancelled == 1
@@ -118,7 +125,10 @@ def test_callback_base_exceptions_stop_notifications_and_allow_reuse(
     if phase == 'completed':
         assert result.iterations > 0
         assert result.samples
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.02).success
+    recovered = runner.run('single_core', warmup_seconds=0, measurement_seconds=0.02)
+    assert_result_references(recovered)
+    assert recovered.success
+    assert recovered.pi_equivalent == 0.375
     assert library.created == library.freed == [1, 2]
     assert library.cancelled == 1
 
@@ -134,13 +144,19 @@ def test_reentrant_runner_global_busy_and_idle_cancellation() -> None:
             return
         checked = True
         same = runner.run('multi_core', warmup_seconds=0, measurement_seconds=0.01)
+        assert_result_references(same)
         assert same.reason == 'this runner is already running'
+        assert same.pi_equivalent is None
         other = run('multi_core', warmup_seconds=0, measurement_seconds=0.01)
+        assert_result_references(other)
         assert other.reason == 'another benchmark is already running'
-    assert runner.run('single_core', warmup_seconds=-0.0, measurement_seconds=0.03, on_progress=callback).success
+        assert other.pi_equivalent is None
+    completed = runner.run('single_core', warmup_seconds=-0.0, measurement_seconds=0.03, on_progress=callback)
+    assert_result_references(completed)
+    assert completed.success
     assert checked
     runner.cancel()
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.02).success
+    assert_runner_reusable(runner)
 
 
 class ManagedNative(Native):
@@ -181,6 +197,28 @@ class ManagedNative(Native):
                                warmup_seconds=warmup_seconds, measurement_seconds=measurement_seconds)
 
 
+@pytest.mark.parametrize('entrypoint', ['runner', 'run', 'run_all'])
+def test_public_api_forwards_default_durations_without_running_long_benchmarks(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: str,
+) -> None:
+    backend = ManagedNative()
+    monkeypatch.setattr(api, 'Native', lambda: backend)
+    results: Tuple[BenchmarkResult, ...]
+    if entrypoint == 'runner':
+        results = (BenchmarkRunner().run('single_core'),)
+    elif entrypoint == 'run':
+        results = (run('single_core'),)
+    else:
+        results = run_all()
+    for result in results:
+        assert_result_references(result)
+    benchmarks = ['single_core', 'multi_core'] if entrypoint == 'run_all' else ['single_core']
+    assert [(result.benchmark, result.warmup_seconds, result.measurement_seconds)
+            for result in results] == [(benchmark, 120.0, 60.0) for benchmark in benchmarks]
+    assert all(result.success for result in results)
+    assert backend.calls == ['create', 'execute', 'free'] * len(benchmarks)
+
+
 @pytest.mark.parametrize('stage', ['init', 'create', 'execute'])
 def test_runner_cleanup_after_errors_and_reuse(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
     backend = ManagedNative()
@@ -194,12 +232,16 @@ def test_runner_cleanup_after_errors_and_reuse(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(api, 'Native', factory)
     runner = BenchmarkRunner()
     result = runner.run('single_core', warmup_seconds=0, measurement_seconds=0.1)
+    assert_result_references(result)
     assert result.status == 'failed'
+    assert result.pi_equivalent is None
     assert result.reason == stage + ' failure'
     assert backend.calls.count('free') == (1 if stage == 'execute' else 0)
     fail_init = False
     backend.error_at = None
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.1).success
+    recovered = runner.run('single_core', warmup_seconds=0, measurement_seconds=0.1)
+    assert_result_references(recovered)
+    assert recovered.success
     runner.cancel()
     assert backend.calls.count('free') == (2 if stage == 'execute' else 1)
     assert 'cancel' not in backend.calls
@@ -222,15 +264,57 @@ def test_cancel_during_handle_creation_is_delivered_before_execution(monkeypatch
         thread.join(5)
     assert not thread.is_alive()
     assert len(results) == 1
+    assert_result_references(results[0])
     assert backend.calls == ['create', 'cancel', 'execute', 'free']
     runner.cancel()
     assert backend.calls[-1] == 'free'
 
 
+def test_busy_call_cannot_clear_another_threads_runner_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = ManagedNative()
+    started, release = Event(), Event()
+    execute = backend.execute
+
+    def blocked(*args: Any) -> BenchmarkResult:
+        started.set()
+        assert release.wait(5)
+        return execute(*args)
+
+    monkeypatch.setattr(backend, 'execute', blocked)
+    monkeypatch.setattr(api, 'Native', lambda: backend)
+    runner = BenchmarkRunner()
+    results: List[BenchmarkResult] = []
+    thread = Thread(target=lambda: results.append(runner.run('single_core')))
+    thread.start()
+    try:
+        assert started.wait(5)
+        owner = runner._active
+        assert owner
+        busy = runner.run('multi_core', warmup_seconds=0, measurement_seconds=.01)
+        assert_result_references(busy)
+        assert busy.reason == 'this runner is already running'
+        assert runner._active is owner
+        assert runner._handle == 123
+        assert runner._native is backend
+        assert 'free' not in backend.calls
+        runner.cancel()
+        assert backend.calls == ['create', 'cancel']
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert len(results) == 1
+    assert_result_references(results[0])
+    assert backend.calls.count('create') == backend.calls.count('free') == 1
+    assert not runner._active
+    assert runner._handle is None
+    assert runner._native is None
+
+
 class ResultLibrary:
     def __init__(self, status: int, reason: Optional[bytes], has_variation: int) -> None:
-        self.value = CResult(ABI_VERSION, status, 2, 2**32 - 1, 123.5, 2.5, 3.5, 4.5, 0,
-                             2**64 - 1, 2**64 - 2, 2, 7, has_variation)
+        self.value = CResultV2(1, status, 2, 2**32 - 1, 123.5, 2.5, 3.5, 4.5, 0,
+                               2**64 - 1, 2**64 - 2, 2, 7, has_variation, 0.375, 1)
         self.reason = reason
         self.config: Optional[Config] = None
         self.cancelled = 0
@@ -240,16 +324,22 @@ class ResultLibrary:
         raw = ctypes.cast(config, ctypes.POINTER(Config)).contents
         self.config = Config.from_buffer_copy(raw)
         for phase in self.phases:
-            progress = CProgress(phase, 2**32 - 1, 0.375, 1.25, 2.5, 2**64 - 1)
+            progress = CProgress(phase, 2**32 - 1, 0.12345678901234567,
+                                 1.2345678901234567, 2.345678901234567, 2**64 - 1)
             callback(ctypes.pointer(progress), None)
         return self.value.status
 
     def benchset_result(self, _handle: int, output: Any) -> int:
+        ctypes.memmove(output, ctypes.byref(self.value), ctypes.sizeof(CResult))
+        return 1
+
+    def benchset_result_v2(self, _handle: int, output: Any, output_size: int) -> int:
+        assert output_size == ctypes.sizeof(CResultV2)
         ctypes.memmove(output, ctypes.byref(self.value), ctypes.sizeof(self.value))
         return 1
 
     def benchset_sample(self, _handle: int, index: int, output: Any) -> int:
-        sample = CSample(4.5 + index, 1.5 + index, 2**64 - 1 - index, 42.5 + index)
+        sample = CSample(4.5 + index, 1.5 + index, 2**64 - 1 - index, 42.123456789012345 + index)
         ctypes.memmove(output, ctypes.byref(sample), ctypes.sizeof(sample))
         return 1
 
@@ -283,34 +373,71 @@ class CallbackLibrary(ResultLibrary):
         self.freed.append(handle)
 
 
+@pytest.mark.parametrize('benchmark', ['single_core', 'multi_core'])
+@pytest.mark.parametrize('unstable', [False, True])
 @pytest.mark.parametrize('status', [0, 1, 2])
 @pytest.mark.parametrize('reason', [None, b'', 'Причина'.encode()])
 @pytest.mark.parametrize('has_variation', [0, 1])
-def test_ctypes_preserves_every_result_sample_and_progress_field(
-    monkeypatch: pytest.MonkeyPatch, status: int, reason: Optional[bytes], has_variation: int,
+def test_ctypes_preserves_every_result_sample_and_progress_field(  # noqa: PLR0913 — Independent native field matrix.
+    monkeypatch: pytest.MonkeyPatch, benchmark: str, unstable: bool, status: int,
+    reason: Optional[bytes], has_variation: int,
 ) -> None:
     native = Native()
     library = ResultLibrary(status, reason, has_variation)
+    library.value.unstable = int(unstable)
     monkeypatch.setattr(native, 'lib', library)
     events: List[Progress] = []
-    result = native.execute(123, 'multi_core', 0.75, 1.25, events.append)
-    assert result.benchmark == 'multi_core'
+    result = native.execute(123, benchmark, 0.75, 1.25, events.append)
+    assert_result_references(result)
+    assert result.benchmark == benchmark
     assert result.status == ['completed', 'cancelled', 'failed'][status]
     assert result.success == (status == 0)
     assert result.reason == (reason.decode() if reason else None)
     assert result.score == (123.5 if status == 0 else None)
+    assert result.pi_equivalent == (0.375 if status == 0 else None)
     assert result.workers == 2**32 - 1
     assert (result.warmup_seconds, result.measurement_seconds, result.elapsed_seconds) == (2.5, 3.5, 4.5)
     assert (result.iterations, result.checksum) == (2**64 - 1, 2**64 - 2)
     assert result.variation_percent == (0 if has_variation else None)
-    assert result.unstable
-    assert result.samples == (Sample(4.5, 1.5, 2**64 - 1, 42.5), Sample(5.5, 2.5, 2**64 - 2, 43.5))
+    assert result.unstable is unstable
+    assert result.samples == (Sample(4.5, 1.5, 2**64 - 1, 42.123456789012345),
+                              Sample(5.5, 2.5, 2**64 - 2, 43.123456789012345))
     assert [event.phase for event in events] == ['warmup', 'measurement', 'completed', 'cancelled', 'failed']
     assert all((p.benchmark, p.workers, p.fraction, p.phase_elapsed_seconds,
-                p.phase_duration_seconds, p.iterations) == ('multi_core', 2**32 - 1, 0.375, 1.25, 2.5, 2**64 - 1) for p in events)
+                p.phase_duration_seconds, p.iterations) == (benchmark, 2**32 - 1, 0.12345678901234567,
+                                                           1.2345678901234567, 2.345678901234567, 2**64 - 1) for p in events)
     assert library.config is not None
     assert (library.config.abi_version, library.config.struct_size, library.config.benchmark,
-            library.config.reserved, library.config.warmup_seconds, library.config.measurement_seconds) == (1, 32, 2, 0, 0.75, 1.25)
+            library.config.reserved, library.config.warmup_seconds, library.config.measurement_seconds) == (1, 32, 1 if benchmark == 'single_core' else 2, 0, 0.75, 1.25)
+
+
+@pytest.mark.parametrize('status', [0, 1, 2])
+@pytest.mark.parametrize('present', [0, 1, 7, 2**32 - 1])
+def test_variation_mapping_preserves_double_precision_and_nonzero_presence(
+    monkeypatch: pytest.MonkeyPatch, status: int, present: int,
+) -> None:
+    native = Native()
+    library = ResultLibrary(status, b'partial diagnostics', present)
+    variation = 12.345678901234567
+    library.value.variation_percent = variation
+    monkeypatch.setattr(native, 'lib', library)
+    result = native.execute(123, 'single_core', 0, 1, None)
+    assert_result_references(result)
+    assert result.status == ['completed', 'cancelled', 'failed'][status]
+    assert result.variation_percent == (variation if present else None)
+
+
+def test_unavailable_variation_does_not_imply_instability(monkeypatch: pytest.MonkeyPatch) -> None:
+    native = Native()
+    library = ResultLibrary(0, None, 0)
+    library.value.unstable = 0
+    library.value.sample_count = 1
+    monkeypatch.setattr(native, 'lib', library)
+    result = native.execute(123, 'multi_core', 0, 1, None)
+    assert_result_references(result)
+    assert result.success
+    assert result.variation_percent is None
+    assert not result.unstable
 
 
 @pytest.mark.parametrize(('platform', 'filename'), [('darwin', 'libbenchset.dylib'), ('win32', 'benchset.dll'), ('linux', 'libbenchset.so')])
@@ -340,6 +467,7 @@ def test_native_package_version_mismatch_is_independent_of_abi(monkeypatch: pyte
 @pytest.mark.parametrize('status', ['completed', 'cancelled', 'failed'])
 def test_models_are_immutable_with_independent_result_defaults(status: str) -> None:
     result = BenchmarkResult('single_core', status=status)
+    assert_result_references(result)
     assert result.success == (status == 'completed')
     for value, field in [(result, 'score'), (Sample(1, 1, 8, 8), 'iterations'), (Progress('single_core', 'warmup', 1, 0, 0, 1, 8), 'fraction')]:
         with pytest.raises(FrozenInstanceError):
@@ -359,6 +487,8 @@ def test_suite_order_forwarding_and_early_stop(monkeypatch: pytest.MonkeyPatch, 
         return BenchmarkResult(name, status=status if len(names) - 1 == stop_index else 'completed')
     monkeypatch.setattr(api, 'run', execute)
     results = run_all(warmup_seconds=0.75, measurement_seconds=1.25, on_progress=callback)
+    for result in results:
+        assert_result_references(result)
     assert names == ['single_core', 'multi_core'][:stop_index + 1]
     assert [result.benchmark for result in results] == names
 
@@ -403,13 +533,38 @@ def test_cli_exit_stream_and_early_stop(monkeypatch: pytest.MonkeyPatch, capsys:
 
 
 def test_cli_render_preserves_semantic_fields_and_empty_optionals() -> None:
-    result = BenchmarkResult('multi_core', status='completed', reason='Причина', score=123.5, workers=7,
+    result = BenchmarkResult('multi_core', version='mapping-test', status='completed', reason='Причина',
+                             score=123.5, pi_equivalent=1.125, workers=7,
+                             warmup_seconds=0.75, measurement_seconds=1.25, elapsed_seconds=4.5,
                              iterations=2**64 - 1, checksum=2**64 - 2, variation_percent=0,
-                             samples=(Sample(4.5, 1.5, 999, 666),))
+                             unstable=True, samples=(Sample(4.5, 1.5, 999, 666), Sample(6.75, 2.25, 40, 17.777)))
     output = io.StringIO()
     cli.render(result, output)
-    for value in ['multi_core', 'Причина', '123.500', 'iterations/s', str(2**64 - 1), str(2**64 - 2), '4.500000', '1.500000', '999', '666.000']:
-        assert value in output.getvalue()
+    fields, samples = output.getvalue().split('Samples:\n')
+    assert {name.strip(): value for name, value in (line.split(' : ', 1) for line in fields.splitlines())} == {
+        'Benchmark': 'multi_core',
+        'Version': 'mapping-test',
+        'Status': 'completed',
+        'Success': 'True',
+        'Reason': 'Причина',
+        'Score': '123.500',
+        'Unit': 'iterations/s',
+        'Reference machine': 'Raspberry Pi 5 Model B Rev 1.0 (pi)',
+        'Pi equivalent': '1.125 \u00d7 pi',
+        'Workers': '7',
+        'Warmup seconds': '0.75',
+        'Measurement seconds': '1.25',
+        'Actual measurement seconds': '4.500000',
+        'Iterations': '18446744073709551615',
+        'Checksum': '18446744073709551614',
+        'Variation percent': '0.000',
+        'Unstable': 'True',
+    }
+    assert [[cell.strip() for cell in row.split('|')] for row in samples.splitlines()] == [
+        ['elapsed s', 'duration s', 'iterations', 'iterations/s'],
+        ['4.500000', '1.500000', '999', '666.000'],
+        ['6.750000', '2.250000', '40', '17.777'],
+    ]
     output = io.StringIO()
     cli.render(replace(result, score=None, reason=None, variation_percent=None, samples=()), output)
     assert '—' in output.getvalue()
@@ -428,7 +583,7 @@ def test_invalid_python_types_raise_before_start_and_do_not_poison_runner(
     # Non-numeric objects violate the typed API: conversion errors are raised.
     with pytest.raises(error):
         runner.run('single_core', **{field: value})  # type: ignore[arg-type]
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.02).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize('benchmark', ['single_core', 'multi_core'])
@@ -481,18 +636,20 @@ class BrokenProgressOutput(io.StringIO):
         return True
 
     def write(self, value: str) -> int:
-        if 'warmup' in value and not self.failed_once:
+        if value.startswith('\r') and not self.failed_once:
             self.failed_once = True
             raise OSError('terminal disconnected')
         return super().write(value)
 
 
+@pytest.mark.parametrize('columns', ['1', '10', '80'])
 def test_cli_output_callback_error_is_reported_as_failure(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], columns: str,
 ) -> None:
     stream = BrokenProgressOutput()
+    monkeypatch.setenv('COLUMNS', columns)
     monkeypatch.setattr(cli.sys, 'stdout', stream)
-    assert cli.main(['--bench', 'single_core', '--warmup', '1', '--duration', '1']) == 1
+    assert cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '.03']) == 1
     assert stream.failed_once
     assert 'terminal disconnected' in capsys.readouterr().err
 
@@ -528,6 +685,7 @@ def test_cancel_racing_cleanup_never_reuses_freed_handle(monkeypatch: pytest.Mon
     assert not execute.is_alive()
     assert not cancel_thread.is_alive()
     assert results[0].success
+    assert_result_references(results[0])
     assert backend.calls == ['create', 'execute', 'free']
 
 
@@ -545,6 +703,7 @@ def test_zero_score_and_variation_are_present_values(monkeypatch: pytest.MonkeyP
     library.value.score = 0
     monkeypatch.setattr(native, 'lib', library)
     result = native.execute(123, 'multi_core', 0, 1, None)
+    assert_result_references(result)
     assert result.score == result.variation_percent == 0
     output = io.StringIO()
     cli.render(result, output)

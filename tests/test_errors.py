@@ -8,6 +8,7 @@ import pytest
 
 from benchset import BenchmarkResult, BenchmarkRunner, api, cli, run, run_all
 from benchset._native import Native
+from tests.helpers import assert_result_references
 
 
 def test_missing_library_is_a_failed_result(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -15,7 +16,9 @@ def test_missing_library_is_a_failed_result(monkeypatch: pytest.MonkeyPatch) -> 
         raise OSError('missing native library')
     monkeypatch.setattr(api, 'Native', missing)
     result = run('single_core', warmup_seconds=0, measurement_seconds=0.01)
+    assert_result_references(result)
     assert not result.success
+    assert result.pi_equivalent is None
     assert result.reason == 'missing native library'
 
 
@@ -39,12 +42,15 @@ def test_cancel_during_loading(monkeypatch: pytest.MonkeyPatch) -> None:
         release.set()
         thread.join(5)
     assert results[0].status == 'cancelled'
+    assert_result_references(results[0])
+    assert results[0].pi_equivalent is None
 
 
 def test_suite_stops_after_failure() -> None:
     results = run_all(warmup_seconds=-1)
     assert len(results) == 1
     assert not results[0].success
+    assert_result_references(results[0])
 
 
 def test_version_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,6 +59,11 @@ def test_version_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(native.lib, 'benchset_abi_version', lambda: 999)
     with pytest.raises(RuntimeError, match='version/ABI'):
         Native()
+    result = run('single_core', warmup_seconds=0, measurement_seconds=0.01)
+    assert_result_references(result)
+    assert result.status == 'failed'
+    assert result.reason is not None
+    assert 'version/ABI' in result.reason
 
 
 def test_allocation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,9 +71,15 @@ def test_allocation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(native.lib, 'benchset_create', lambda: 0)
     with pytest.raises(RuntimeError, match='allocate'):
         native.create()
+    monkeypatch.setattr(api, 'Native', lambda: native)
+    result = run('single_core', warmup_seconds=0, measurement_seconds=0.01)
+    assert_result_references(result)
+    assert result.status == 'failed'
+    assert result.reason is not None
+    assert 'allocate' in result.reason
 
 
-@pytest.mark.parametrize('function', ['benchset_result', 'benchset_sample'])
+@pytest.mark.parametrize('function', ['benchset_result_v2', 'benchset_sample'])
 def test_native_getter_failure(monkeypatch: pytest.MonkeyPatch, function: str) -> None:
     native = Native()
     handle = native.create()
@@ -81,6 +98,7 @@ class Terminal(io.StringIO):
 
 def test_terminal_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     terminal = Terminal()
+    monkeypatch.setenv('COLUMNS', '80')
     monkeypatch.setattr(cli.sys, 'stdout', terminal)
     assert cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '0.02']) == 0
     assert 'measurement' in terminal.getvalue()

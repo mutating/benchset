@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -13,8 +16,66 @@ REPOSITORY = 'mutating/benchset'
 VERSION = '0.0.1'
 
 
+@pytest.mark.parametrize('dependency', ['pytest', 'mypy', 'build', 'filelock'])
+def test_release_checks_install_executable_test_dependencies(dependency: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / '.github/workflows/release.yml').read_text(encoding='utf-8')
+    checks = re.search(r'^  checks:\n(.*?)(?=^  \w+:)', workflow, re.MULTILINE | re.DOTALL)
+    assert checks is not None
+    installation = re.search(r'^\s+- run: (python -m pip install .+)$', checks.group(1), re.MULTILINE)
+    assert installation is not None
+    command = shlex.split(installation.group(1))
+    requirements = (root / 'requirements_dev.txt').read_text(encoding='utf-8').splitlines()
+    pin = next(requirement for requirement in requirements if requirement.startswith(dependency + '=='))
+    assert pin in command[4:], f'release checks must install {pin} before running all tests'
+
+
+@pytest.mark.parametrize('outcome', ['completed', 'no_work', 'unexpected_failure', 'wrong_reference', 'wrong_run'])
+def test_release_wheel_gate_checks_result_references_without_requiring_cpu_time(
+    monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    import benchset  # noqa: PLC0415
+
+    workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/release.yml').read_text()
+    match = re.search(r'CIBW_TEST_COMMAND: >-\n((?:            .+\n)+)', workflow)
+    assert match is not None
+    command = shlex.split(' '.join(line.strip() for line in match.group(1).splitlines()))
+    assert command[:2] == ['python', '-c']
+    assert len(command) == 3
+    scores = {entry.benchmark: entry.score for entry in benchset.PI_REFERENCE_RUN.results}
+
+    def run(name: str, **_options: float) -> benchset.BenchmarkResult:
+        if outcome in ('completed', 'wrong_reference', 'wrong_run'):
+            result = benchset.BenchmarkResult(name, status='completed', score=scores[name], pi_equivalent=1.0)
+            if outcome == 'wrong_reference':
+                result = replace(result, reference_machine=replace(result.reference_machine))
+            elif outcome == 'wrong_run':
+                result = replace(result, reference_run=replace(result.reference_run))
+            return result
+        return benchset.BenchmarkResult(name, reason=(
+            'measurement window was too short to complete any work' if outcome == 'no_work' else 'worker failed'
+        ))
+
+    def run_all(**options: float) -> List[benchset.BenchmarkResult]:
+        first = run('single_core', **options)
+        return [first, run('multi_core', **options)] if first.success else [first]
+
+    monkeypatch.setattr(benchset, 'run', run)
+    monkeypatch.setattr(benchset, 'run_all', run_all)
+    if outcome in ('unexpected_failure', 'wrong_reference', 'wrong_run'):
+        with pytest.raises(AssertionError):
+            exec(command[2], {})
+    else:
+        exec(command[2], {})
+
+
 @pytest.fixture
-def source(tmp_path: Path) -> Path:
+def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Temporary repositories must not inherit signing or hooks from the host.
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(tmp_path / 'empty-gitconfig'))
+    monkeypatch.delenv('GIT_CONFIG_COUNT', raising=False)
+    monkeypatch.delenv('GIT_CONFIG_PARAMETERS', raising=False)
     root = tmp_path / 'project'
     root.mkdir()
     (root / 'Cargo.toml').write_text('[package]\nname = "benchset"\nversion = "0.0.1"\n')

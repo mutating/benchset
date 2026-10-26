@@ -9,6 +9,7 @@ import pytest
 
 from benchset import BenchmarkRunner, Progress, api
 from benchset._native import Native
+from tests.helpers import assert_runner_reusable
 from tests.test_semantics import CallbackLibrary, ManagedNative
 
 
@@ -55,13 +56,15 @@ def test_callback_capture_released_without_gc_even_after_native_failure(
             raise RuntimeError('native run failed after callback')
         monkeypatch.setattr(library, 'benchset_run', broken_run)
     elif stage != 'complete':
-        monkeypatch.setattr(library, 'benchset_' + stage, lambda *_arguments: 0)
+        getter = 'benchset_result_v2' if stage == 'result' else 'benchset_sample'
+        monkeypatch.setattr(library, getter, lambda *_arguments: 0)
 
     callback = CallbackProbe(error_type)
     observed = weakref.ref(callback)
     result = BenchmarkRunner().run('single_core', warmup_seconds=0, measurement_seconds=0.01, on_progress=callback)
     del callback
     assert result.status == ('completed' if error_type is None and stage == 'complete' else 'failed')
+    assert result.pi_equivalent == (0.375 if result.success else None)
     assert library.created == library.freed == [1]
     assert observed() is None, 'a completed run must not retain the callback or its captured data'
 
@@ -75,8 +78,9 @@ def test_live_callback_capture_released_without_gc(outcome: str) -> None:
     result = runner.run('single_core', warmup_seconds=0, measurement_seconds=0.02, on_progress=callback)
     del callback
     assert result.status == outcome
+    assert (result.pi_equivalent is not None) == (outcome == 'completed')
     assert observed() is None
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.02).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize('error_type', [KeyboardInterrupt, RuntimeError])
