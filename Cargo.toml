@@ -1,6 +1,7 @@
 [package]
 name = "benchset"
-version = "0.0.2"
+# Generated from [project].version in pyproject.toml by scripts/version.py.
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.74"
 description = "Embeddable sustained scalar CPU benchmarks with a C ABI"

@@ -11,6 +11,11 @@ import sys
 import zipfile
 from pathlib import Path
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.version import sync_version
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -26,17 +31,21 @@ def main():
     parser.add_argument('--target', required=True)
     parser.add_argument('--apple', action='store_true')
     args = parser.parse_args()
+    sync_version(ROOT)
     subprocess.run(['cargo', 'build', '--release', '--locked', '--target', args.target], cwd=ROOT, check=True)
     staging = ROOT / 'release-artifacts' / args.target
     staging.mkdir(parents=True, exist_ok=True)
     source = ROOT / 'target' / args.target / 'release'
     (staging / 'lib').mkdir(exist_ok=True)
-    for filename in ('libbenchset.a', 'benchset.lib', 'libbenchset.dylib', 'libbenchset.so', 'benchset.dll'):
+    for filename in ('libbenchset.a', 'benchset.lib', 'libbenchset.dylib', 'libbenchset.so',
+                     'benchset.dll', 'benchset.dll.lib'):
         if (source / filename).exists():
             shutil.copy2(source / filename, staging / 'lib' / filename)
     shutil.copytree(ROOT / 'include', staging / 'include', dirs_exist_ok=True)
     for filename in ('README.md', 'LICENSE'):
         shutil.copy2(ROOT / filename, staging / filename)
+    (staging / 'native').mkdir(exist_ok=True)
+    shutil.copy2(ROOT / 'native/reference-calibration.json', staging / 'native/reference-calibration.json')
     archive(staging, staging.parent / ('benchset-' + args.target + '.zip'))
     if not args.apple:
         return
@@ -70,6 +79,8 @@ def main():
     shutil.copytree(ROOT / 'Artifacts', swift_package / 'Artifacts', dirs_exist_ok=True)
     shutil.copy2(ROOT / 'README.md', swift_package / 'README.md')
     shutil.copy2(ROOT / 'LICENSE', swift_package / 'LICENSE')
+    (swift_package / 'native').mkdir(exist_ok=True)
+    shutil.copy2(ROOT / 'native/reference-calibration.json', swift_package / 'native/reference-calibration.json')
     archive(swift_package, swift_package.parent / 'Benchset-Swift.zip')
     archive(ROOT / 'Artifacts', swift_package.parent / 'Benchset.xcframework.zip')
 

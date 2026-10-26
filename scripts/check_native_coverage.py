@@ -11,7 +11,13 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.version import sync_version
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,6 +120,7 @@ def main():
     parser.add_argument('language', choices=['rust', 'swift'])
     parser.add_argument('--llvm-tools', type=Path, help='Rust LLVM tools directory (must match rustc LLVM version)')
     args = parser.parse_args()
+    sync_version(ROOT)
     destination = ROOT / 'target/coverage' / args.language
     destination.mkdir(parents=True, exist_ok=True)
     if args.language == 'rust':

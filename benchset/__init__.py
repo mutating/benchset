@@ -14,3 +14,10 @@ from benchset.models import (
     Sample as Sample,
     __version__ as __version__,
 )
+from benchset.reference import (
+    PI_REFERENCE_MACHINE as PI_REFERENCE_MACHINE,
+    PI_REFERENCE_RUN as PI_REFERENCE_RUN,
+    ReferenceBenchmarkResult as ReferenceBenchmarkResult,
+    ReferenceMachine as ReferenceMachine,
+    ReferenceRun as ReferenceRun,
+)

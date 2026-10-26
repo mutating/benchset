@@ -7,7 +7,13 @@ needed by applications embedding the native library.
 The initial suite contains **`single_core`** (one computational worker) and
 **`multi_core`** (all available computational workers). Both execute the same
 fixed mixed workload and return a score in **completed iterations per second**.
-Higher is faster. There is no reference machine or score normalization.
+Higher is faster. Each completed result also includes a **Pi equivalent**:
+its throughput divided by the same benchmark's sustained Raspberry Pi 5 score.
+`0.5` means half the Pi's throughput, `1.0` equal throughput, and `2.0` twice
+the Pi's throughput. The CLI prints both iterations/s and `Pi equivalent`.
+
+This README describes the current source tree. For changes not yet published,
+use `pip install .` or the local Rust/Swift dependencies described below.
 
 ## Install and run
 
@@ -33,14 +39,17 @@ these build tools.
 
 | CLI option | Default | Meaning |
 |---|---:|---|
-| `--bench` | all | `single_core` or `multi_core`; omitted runs both in this order |
+| `--bench` | all | `all`, `single_core` or `multi_core`; `all` runs both in this order |
 | `--warmup` | 120 | Seconds of continuous workload excluded from the score; zero is allowed |
 | `--duration` | 60 | Seconds of measurement after warmup; must be positive |
-| `--help` | | Show syntax |
+| `-h`, `--help` | | Show options, defaults, examples and Pi equivalent interpretation |
 | `--version` | | Show the library/benchmark version |
 
 `--bench` is the public spelling of the selector. CLI settings are read through
 `skelet`; configuration files and environment settings are not used.
+Options accept both `--duration 0.5` and `--duration=0.5`, in any order;
+durations accept decimal and scientific notation. A supplied option requires
+a value. Repeating an option uses its last value.
 
 A default full suite takes approximately six minutes. Each benchmark has its
 own warmup. Warmup transitions directly into measurement without stopping the
@@ -49,6 +58,25 @@ Completed result fields, including all measurement samples, are printed to
 stdout. Failed/cancelled results go to stderr. Exit codes: 0 completed, 1
 execution failure, 2 invalid CLI arguments, 130 interrupted/cancelled. The
 suite stops after a failed or cancelled benchmark.
+Each result is flushed immediately, including when stdout is redirected.
+Progress fits the terminal width and is cleared before the result. Output
+uses `× pi` and `—` when the stream supports them, with `x pi` and `-` as
+fallbacks for restrictive encodings. A closed stdout pipe exits with code 1
+without a traceback.
+
+For example, a completed result at half the reference throughput includes
+these lines (illustrative values; other fields and samples are omitted):
+
+```text
+Benchmark                  : single_core
+Score                      : 23,615.614
+Unit                       : iterations/s
+Reference machine          : Raspberry Pi 5 Model B Rev 1.0 (pi)
+Pi equivalent              : 0.5 × pi
+```
+
+The multiplier uses the full-precision native score, before display rounding.
+An unavailable multiplier is displayed as `—` (`-` in the fallback format).
 
 ## Python API
 
@@ -60,11 +88,12 @@ from benchset import run, run_all
 
 result = run('single_core', warmup_seconds=120, measurement_seconds=60)
 if result.success:
-    print(result.score, result.unit)
+    print(f'{result.score} {result.unit}, {result.pi_equivalent} x {result.reference_machine.short_name}')
 else:
     print(result.status, result.reason)
 
 results = run_all(warmup_seconds=120, measurement_seconds=60)
+print(result.reference_run.started_at, result.reference_run.results)
 ```
 
 For a GUI or cancellable task, run a reusable runner on a background thread:
@@ -92,11 +121,16 @@ iterations in that phase. Dispatch UI updates to the UI thread yourself and
 return promptly. A Python callback exception cancels the workload and produces
 a failed result; it does not propagate through C.
 
-`BenchmarkRunner.cancel()` is thread-safe while a call is active. After it
-returns, all native workers are joined and the runner can be reused. Concurrent
+`BenchmarkRunner.cancel()` is thread-safe and requests cancellation without
+waiting for the active call to finish. After `run()` returns, all native workers
+are joined and the runner can be reused. Concurrent
 runs are rejected. The native core enforces one active run per loaded library
 instance, including calls from separate Python runners. Separate OS processes
 or separately linked copies of the library can still compete for CPU time.
+
+With Python's default SIGINT handler, Ctrl+C during a main-thread call cancels
+the native work and raises `KeyboardInterrupt` after cleanup. Custom signal
+handlers are preserved.
 
 ## What one iteration does
 
@@ -159,6 +193,8 @@ The immutable Python result contains:
 | `benchmark`, `version` | Name and benchmark/library version |
 | `status`, `success`, `reason` | `completed`, `cancelled` or `failed`; explanation on failure |
 | `score`, `unit` | Iterations/s; `score=None` unless completed |
+| `pi_equivalent` | Double-precision `score / reference_score` for this benchmark; `None` unless completed |
+| `reference_machine`, `reference_run` | Calibration machine and series, present for every result status |
 | `workers` | Number of computational workers |
 | `warmup_seconds`, `measurement_seconds` | Requested windows |
 | `elapsed_seconds`, `iterations` | Actual measured wall time and completed work |
@@ -171,21 +207,124 @@ interval iterations and iterations/s. Variation is `None` with fewer than two
 samples. It reports within-run variability, not repeat-to-repeat accuracy.
 An unstable run retains its score and completed status; the consumer decides
 whether to use it. Cancellation/failure can retain partial diagnostics but
-never produces a usable score.
+never produces a usable score or Pi equivalent. An unstable completed run
+retains its Pi equivalent. Multi-core compares total measured throughput with
+the multi-core reference; it does not normalize either score by worker count.
 
-The Python package version is defined in `pyproject.toml`. `benchset.__version__`
-and result objects read the installed package metadata through
+## The Pi reference
+
+The immutable global machine record is `PI_REFERENCE_MACHINE` in Rust/Python
+and `piReferenceMachine` in Swift. It describes **Raspberry Pi 5 Model B Rev
+1.0**, abbreviated **`pi`**, with **Ubuntu Server 26.04 LTS**, **aarch64**, four
+CPU cores and **8 GiB (8,589,934,592 bytes) of installed RAM**. Installed
+capacity differs from the OS's usable `MemTotal` (8,317,272,064 bytes during
+calibration). The metadata describes the reference machine, independently of
+the device running the library.
+
+The public names are:
+
+| Interface | Result multiplier | Reference machine | Reference series |
+|---|---|---|---|
+| Python | `result.pi_equivalent: Optional[float]` | `result.reference_machine: ReferenceMachine` | `result.reference_run: ReferenceRun` |
+| Rust | `result.pi_equivalent: Option<f64>` | `result.reference_machine: &'static ReferenceMachine` | `result.reference_run: &'static ReferenceRun` |
+| Swift | `result.piEquivalent: Double?` | `result.referenceMachine: ReferenceMachine` | `result.referenceRun: ReferenceRun` |
+| C / C++ V3 | `result.base.pi_equivalent`, when `result.base.has_pi_equivalent != 0` | `result.reference_machine` | `result.reference_run` + `benchset_reference_result` |
+
+Every returned result carries these calibration records, including completed,
+unstable, failed, cancelled, busy and validation-error results. They describe
+the same fixed Pi reference for both workloads. Python fields default to the
+existing globals (`result.reference_machine is PI_REFERENCE_MACHINE` and
+`result.reference_run is PI_REFERENCE_RUN`); the new fields follow all previous
+constructor arguments. `dataclasses.asdict(result)` includes both records as
+nested data with numeric `started_at_unix_seconds`. Rust fields borrow the
+public statics. Swift computed properties return the global structs with ordinary
+value semantics. The globals
+remain available without running a benchmark; C also retains its handle-free
+`benchset_reference_machine` and `benchset_reference_run` getters.
+
+Rust callers that construct `BenchmarkResult` with a struct literal must add
+the new `pi_equivalent`, `reference_machine` and `reference_run` fields. This
+source change follows from extending the public result struct; callers that
+obtain results from benchmark functions keep their existing call signatures.
+
+Every multiplier is a double-precision value. It is available for completed
+results, including unstable ones. Failed/cancelled results have no multiplier:
+`None` in Python/Rust, `nil` in Swift, or a zero presence flag in C.
+
+`PI_REFERENCE_RUN` / Swift `piReferenceRun` describes the final six-run
+calibration series, starting at its first warmup and ending with the final
+measurement, before final cooling. It began on **2026-10-23 at
+14:59:50.517391 UTC** (Unix seconds `1792767590.517391`); CPU temperature was
+**41.35 °C** at the beginning and **66.65 °C** at the end. Preparation, plateau
+profiling and the later cooling period are outside these boundaries. The
+reference series ended on 23 October, including in Moscow; the larger session
+with preparation and cooling crossed midnight.
+
+Each benchmark had three independent measurements of 300 seconds, with cooling
+verified by temperature readings between experiments. The stored score pools
+all three measurements as **total iterations / total actual elapsed seconds**;
+it is neither the best repeat nor a rounded display value:
+
+| Benchmark | Iterations | Actual measurement seconds | Reference iterations/s |
+|---|---:|---:|---:|
+| `single_core` | 42,508,112 | 900.000162475 | 47231.227029007096 |
+| `multi_core` | 163,757,952 | 900.000523364 | 181953.17419139884 |
+
+The historical calibration used **1248 seconds (20 minutes 48 seconds) of
+warmup before every measurement**. This is the conservative 960-second plateau
+boundary plus 30%, based on both throughput and thermal establishment. There
+was no substantial prolonged throughput decline during profiling. The
+library's runtime defaults remain **120 seconds warmup / 60 seconds
+measurement**; callers can choose their own windows. The reference warmup is
+recorded provenance, not an automatic runtime setting.
+
+The metadata types are `ReferenceMachine`, `ReferenceRun` and
+`ReferenceBenchmarkResult` in Rust, Python and Swift. In Rust/Python their
+fields are:
+
+- `ReferenceMachine`: `name`, `short_name`, `os_name`, `os_version`,
+  `cpu_architecture`, `memory_bytes` and `cpu_cores`.
+- `ReferenceRun`: `started_at_unix_seconds`, `start_temperature_c`,
+  `end_temperature_c`, `warmup_seconds` and `results`. Temperatures are in
+  Celsius; the warmup is in seconds before **each** reference measurement.
+- `ReferenceBenchmarkResult`: `benchmark` and `score` (iterations/s).
+  `results` contains two pooled entries, one per benchmark, rather than six
+  separate repeats.
+
+Swift uses camelCase fields, such as `shortName`, `startedAtUnixSeconds` and
+`startTemperatureC`. Python additionally offers the timezone-aware UTC
+`started_at` datetime; Swift offers `startedAt: Date` for the same instant.
+The frozen Python records use a tuple for results; Swift returns immutable
+value snapshots. Reading the Python globals does not load the native library.
+
+[Calibration values and provenance](native/reference-calibration.json) include
+the original kernel commit, binary SHA-256, raw pooled totals and series
+boundaries. The calibration used the unchanged scalar kernel at commit
+`1b6771c1fe47514edfe72384b76a1d595cb2ff10`. Ambient conditions were not
+controlled; the measured idle temperature shifted, so later cooling also
+accepted a documented stable idle plateau. Ratios describe these workloads
+and this reference configuration. The library reads these fixed values
+locally; it does not connect to the Pi, query sensors or require the original
+experiment directory.
+
+The only editable package version is `[project].version` in `pyproject.toml`.
+The version values in `Cargo.toml`, the package's `Cargo.lock` entry and the
+Rust/Swift dependency pins below are generated copies. `benchset.__version__`
+and result objects read installed Python package metadata through
 `importlib.metadata`; no Python source version constant needs updating.
-The native library shares this version; builds check its Cargo metadata for
-consistency. Consumers decide which versions and measurement settings are comparable.
+Rust, C and Swift read the version compiled from the generated Cargo metadata.
+Python builds (including metadata, sdist, wheel and editable hooks),
+`scripts/build_native.py` and `scripts/package_native.py` automatically refresh
+these copies before building. Consumers decide which versions and measurement
+settings are comparable.
 
 ## Embed in Rust
 
 ```toml
 [dependencies]
-benchset = "0.0.1"
-# Before registry publication, use:
-# benchset = { git = "https://github.com/mutating/benchset.git" }
+benchset = "0.0.3"
+# For changes from a local source checkout, use:
+# benchset = { path = "../benchset" }
 ```
 
 ```rust
@@ -193,7 +332,12 @@ use benchset::{run, Benchmark, Cancellation, Options};
 let cancellation = Cancellation::default();
 let result = run(Benchmark::MultiCore, Options::default(), &cancellation,
                  |progress| println!("{:?}: {}", progress.phase, progress.fraction));
-println!("{:?}", result.score);
+if let (Some(score), Some(equivalent)) = (result.score, result.pi_equivalent) {
+    println!("{score:.3} iterations/s, {equivalent:.3} x {}", result.reference_machine.short_name);
+} else {
+    println!("{:?}: {}", result.status, result.reason);
+}
+println!("Reference warmup: {} s", result.reference_run.warmup_seconds);
 ```
 
 The cancellation token can be cloned and cancelled from another thread. It is
@@ -214,25 +358,66 @@ dynamic loading. `include/benchset.h` documents structures, status codes and
 lifetime rules. `examples/native/c.c` demonstrates configuration and progress.
 
 ```c
+/* Inside main(); callback/context are supplied by the host application. */
+if (benchset_abi_version() != BENCHSET_ABI_VERSION) return 1;
 BenchsetConfig config;
-benchset_default_config(&config);
+if (!benchset_default_config(&config)) return 1;
 config.benchmark = BENCHSET_MULTI_CORE;
 BenchsetHandle *handle = benchset_create();
 if (handle) {
     benchset_run(handle, &config, callback, context);
-    BenchsetResult result;
-    if (benchset_result(handle, &result) && result.status == BENCHSET_COMPLETED) {
-        /* result.score is iterations/s */
+    BenchsetResultV3 result;
+    if (benchset_result_v3(handle, &result, sizeof(result))) {
+        const BenchsetReferenceMachine *machine = result.reference_machine;
+        const BenchsetReferenceRun *reference = result.reference_run;
+        /* machine and reference are available even after failure/cancellation. */
+        printf("Reference: %s, warmup %.0f s\n", machine->name, reference->warmup_seconds);
+        if (result.base.base.status == BENCHSET_COMPLETED && result.base.has_pi_equivalent) {
+            /* result.base.base.score is iterations/s; result.base.pi_equivalent is a multiplier. */
+        }
+        /* The metadata pointers remain valid after benchset_free(handle). */
     }
     benchset_free(handle);
 }
 ```
 
 Call `benchset_cancel(handle)` from another thread or a progress callback.
-Handles are single-use. Getters are used after `benchset_run` returns. Strings
-are borrowed until the handle is freed; progress pointers are borrowed only
-during the callback. Do not free a handle while it is in use or throw/unwind
-through a C callback. Invalid configuration produces a failed result.
+Handles are single-use. Result/sample getters are used after `benchset_run`
+returns. The reason string is borrowed until the handle is freed; the version
+string is valid for the loaded library's lifetime. Progress pointers are
+borrowed only during the callback. Do not free a handle while it is in use or
+throw/unwind through a C callback. Invalid configuration produces a failed result.
+
+The C ABI version remains 1. The additive, size-checked
+`benchset_reference_machine`, `benchset_reference_run` and indexed
+`benchset_reference_result` getters need no handle. Their
+immutable strings remain valid for the loaded library's lifetime. Pass the
+exact output structure size to these getters, `benchset_result_v2` and
+`benchset_result_v3`;
+failure returns zero and leaves the output unchanged. Any nonzero
+`has_pi_equivalent` flag means present, including a multiplier of `0.0`.
+Existing ABI-1 configurations and the original 88-byte `BenchsetResult`
+layout/getter retain their behavior, so existing consumers continue to run.
+New consumers check `benchset_abi_version()` and use the extended result getter
+to access the multiplier. V2 and V3 name additive result formats; they use the
+same ABI-1 configuration. Older libraries can report ABI 1 while lacking the
+new getters, so the Python wrapper checks its required symbols before allocating
+a handle.
+
+`BenchsetResultV3` adds a complete `BenchsetResultV2 base` followed by const
+`reference_machine` and `reference_run` pointers. Both pointers are non-null
+for every available result. They and their strings remain immutable and valid
+after `benchset_free(handle)`, until the library is unloaded. Do not use the
+freed handle or its reason string. The ABI version remains 1, and the V1
+(88-byte) and V2 (104-byte) structures and getters retain their layouts and
+behavior. V3 is 120 bytes on
+the supported 64-bit platforms.
+
+The C metadata types are `BenchsetReferenceMachine`, `BenchsetReferenceRun`
+and `BenchsetReferenceBenchmarkResult`. `BenchsetReferenceRun.result_count`
+replaces the Rust/Python/Swift `results` collection: retrieve each entry with
+`benchset_reference_result(index, &entry, sizeof(entry))`, using zero-based
+indices smaller than `result_count`.
 
 When statically linking Rust into a foreign application, system libraries may
 also be required. Obtain their list with
@@ -252,11 +437,13 @@ the same repository. Rust is not required by the consumer.
 For a Swift manifest, add:
 
 ```swift
-.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.1"))
+.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.3"))
 ```
 
 Add `.product(name: "Benchset", package: "benchset")` to your target's
 dependencies. Pinning a version also pins the benchmark implementation.
+For unreleased changes, build the Apple package from source as shown below
+and use `.package(path: "../benchset")` instead.
 
 For offline use, download and extract **`Benchset-Swift.zip`** from the release
 and add the extracted directory as a local package. It contains the wrapper,
@@ -270,6 +457,12 @@ let runner = BenchmarkRunner()
 let result = try runner.run(.multiCore, warmupSeconds: 120, measurementSeconds: 60) {
     progress in print(progress.fraction)
 }
+if let score = result.score, let equivalent = result.piEquivalent {
+    print("\(score) \(result.unit), \(equivalent) x \(result.referenceMachine.shortName)")
+} else {
+    print(result.status, result.reason as Any)
+}
+print(result.referenceRun.startedAt, result.referenceRun.warmupSeconds)
 // Another thread may call runner.cancel() while run is active.
 ```
 
@@ -314,6 +507,14 @@ installation. Release wheels are platform-specific but interpreter-independent
 correctness, result accounting, progress, cancellation and API/CLI behavior;
 they do not enforce speed thresholds in CI.
 
+`python -m pytest tests/test_reference_artifacts.py` also builds and runs
+consumers of unpacked crates, source distributions, wheels and native ZIPs
+outside the checkout. Build the Apple package first to include its unpacked
+Swift consumer and symbol checks for both XCFramework architectures. All smoke
+measurements use short explicit windows, never the historical calibration
+warmup. The [Pi equivalent test plan](tests/pi-equivalent-plan.md) records both
+rounds of independent test reviews and their deduplicated scenarios.
+
 ## Test coverage
 
 The [test matrix](tests/coverage-plan.md) combines five independent reviews and
@@ -346,10 +547,21 @@ All distributions are released from this repository by
 `.github/workflows/release.yml`. A push to `main` checks the common package
 version. An unreleased version is built and published automatically; a version
 whose managed GitHub Release is already published is skipped. To release a new
-version, update `Cargo.toml` and `pyproject.toml` together,
-run `cargo generate-lockfile` to update `Cargo.lock`, commit the changes and
-push to `main`. Use an `X.Y.Z` version. Do not create or move release tags
-manually.
+version, change only `[project].version` in `pyproject.toml`, commit it and push
+to `main`. Use an `X.Y.Z` version. Builds automatically synchronize the Cargo
+manifest, lockfile entry and README dependency pins; no separate version command
+is needed. The prepared release commit freezes those generated values for all
+published source archives and tags. `python scripts/version.py --check` remains
+an optional diagnostic; it does not have to pass on an unbuilt checkout after a
+version edit.
+
+For a local native build after editing the version, use
+`python scripts/build_native.py`; for native/Swift archives use
+`python scripts/package_native.py --target <target>` (add `--apple` for the
+universal Swift package). Cargo reads its package version before `build.rs`
+runs, so direct `cargo build`/`cargo package` use the already-generated manifest.
+Published crates contain that manifest and still build without Python. Do not
+create or move release tags manually.
 
 The workflow performs these steps:
 
@@ -360,8 +572,9 @@ The workflow performs these steps:
    the Linux containers; update the pin and package version together when
    changing the release toolchain.
 3. Compute the XCFramework archive checksum and create a detached release
-   commit that changes only `Package.swift`. Its parent is the tested source
-   commit. `main` keeps its local development manifest.
+   commit containing generated version values and `Package.swift`. Its parent
+   is the tested canonical source commit; unrelated source changes are rejected.
+   `main` keeps its local development manifest.
 4. Build the sdist and crate from that exact release commit, then retain the
    complete, checksummed release bundle as a GitHub Actions artifact.
 5. Push `v<version>` at the prepared commit and populate a draft GitHub Release

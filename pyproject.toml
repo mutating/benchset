@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "filelock>=3.16.1"]
+requires = ["setuptools>=68", "wheel", "filelock>=3.16.1", "tomli>=1; python_version < '3.11'"]
 build-backend = "scripts.build_backend"
 backend-path = ["."]
 
 [project]
 name = "benchset"
-version = "0.0.2"
+version = "0.0.3"
 authors = [
   { name="Evgeniy Blinov", email="zheni-b@yandex.ru" },
 ]

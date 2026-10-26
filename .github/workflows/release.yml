@@ -56,6 +56,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.build == 'true'
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -67,7 +68,19 @@ jobs:
         with:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@1.94.1
-      - run: python -m pip install pytest==8.3.5 filelock==3.16.1 'setuptools>=68' 'skelet>=0.0.21'
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Keep Cargo on the MSVC linker when running in Git Bash
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msvcLink = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64\link.exe'
+          if (!(Test-Path $msvcLink)) { throw "MSVC linker not found: $msvcLink" }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvcLink" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install both architectures for universal Apple package tests
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: python -m pip install pytest==8.3.5 mypy==1.14.1 filelock==3.16.1 build==1.2.2.post1 wheel 'setuptools>=68' 'skelet>=0.0.21'
       - run: python -m pip install .
       - run: python scripts/build_native.py
       - run: python -m pytest -q
@@ -76,6 +89,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.build == 'true'
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
@@ -111,7 +125,17 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.94.1'
           CIBW_ENVIRONMENT_LINUX: 'CARGO_HOME=/tmp/benchset-cargo RUSTUP_HOME=/tmp/benchset-rustup PATH=/tmp/benchset-cargo/bin:$PATH'
           CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET=${{ matrix.minimum }}'
-          CIBW_TEST_COMMAND: 'python -c "from benchset import run; r=run(''single_core'', warmup_seconds=0, measurement_seconds=0.05); assert r.success, r.reason"'
+          CIBW_TEST_COMMAND: >-
+            python -c "import math; from benchset import PI_REFERENCE_MACHINE as m, PI_REFERENCE_RUN as p, run;
+            assert m.short_name == 'pi' and m.memory_bytes == 8589934592 and m.cpu_cores == 4;
+            assert p.warmup_seconds == 1248.0 and p.started_at_unix_seconds == 1792767590.517391;
+            refs = {r.benchmark: r.score for r in p.results};
+            assert refs == {'single_core': 47231.227029007096, 'multi_core': 181953.17419139884};
+            results = [run(name, warmup_seconds=0, measurement_seconds=0.05) for name in refs];
+            assert all(r.reference_machine is m and r.reference_run is p and
+            ((r.success and math.isfinite(r.pi_equivalent) and r.pi_equivalent == r.score / refs[r.benchmark]) or
+            (r.status == 'failed' and r.reason == 'measurement window was too short to complete any work'
+            and r.iterations == 0 and r.score is None and r.pi_equivalent is None)) for r in results)"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
@@ -123,6 +147,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.build == 'true'
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
@@ -148,7 +173,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.1
         with:
           targets: ${{ matrix.target }}
-      - run: cargo test --locked -- --test-threads=1
+      - name: Test Rust core with the generated package version
+        run: |
+          python scripts/version.py
+          cargo test --locked -- --test-threads=1
       - name: Package platform libraries
         if: runner.os != 'Linux'
         run: python scripts/package_native.py --target ${{ matrix.target }}
@@ -164,6 +192,8 @@ jobs:
           python scripts/package_native.py --target aarch64-apple-darwin --apple
           swift build
           python scripts/check_native_coverage.py swift
+          python -m pip install pytest==8.3.5
+          python -m pytest -q tests/test_reference_artifacts.py -k swift
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}
@@ -193,7 +223,7 @@ jobs:
         with:
           pattern: native-*
           path: target/build-artifacts/native
-      - name: Generate the Swift manifest and detached release commit
+      - name: Freeze generated versions and Swift manifest in the detached release commit
         id: prepare
         run: python scripts/release.py prepare --artifacts target/build-artifacts --output target/prepared
       - uses: actions/upload-artifact@v4

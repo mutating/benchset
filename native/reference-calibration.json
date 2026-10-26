@@ -1,0 +1,47 @@
+{
+  "machine": {
+    "name": "Raspberry Pi 5 Model B Rev 1.0",
+    "short_name": "pi",
+    "os_name": "Ubuntu Server",
+    "os_version": "26.04 LTS",
+    "cpu_architecture": "aarch64",
+    "memory_bytes": 8589934592,
+    "cpu_cores": 4
+  },
+  "run": {
+    "started_at_unix_seconds": 1792767590.517391,
+    "start_temperature_c": 41.35,
+    "end_temperature_c": 66.65,
+    "warmup_seconds": 1248.0,
+    "results": [
+      {
+        "benchmark": "single_core",
+        "score": 47231.227029007096
+      },
+      {
+        "benchmark": "multi_core",
+        "score": 181953.17419139884
+      }
+    ]
+  },
+  "totals": {
+    "single_core": {
+      "iterations": 42508112,
+      "elapsed_seconds": 900.000162475
+    },
+    "multi_core": {
+      "iterations": 163757952,
+      "elapsed_seconds": 900.000523364
+    }
+  },
+  "provenance": {
+    "source_commit": "1b6771c1fe47514edfe72384b76a1d595cb2ff10",
+    "binary_sha256": "66e11205249192362067c3a4151409be4ae1e2207528ac370c9b12ae23ccfd17",
+    "source": "Final six-run reference series; three cold repeats per workload, pooled iterations / actual seconds.",
+    "start_event": "reference-single_core-1 run_start, including warmup",
+    "end_event": "reference-multi_core-3 completed progress callback, before cooling",
+    "end_callback_unix_seconds": 1792787659.691857,
+    "timestamp_source": "Pi UTC wall clock; duration measurements used its monotonic clock",
+    "nominal_memory_note": "8 GiB installed capacity; Linux MemTotal was 8317272064 bytes."
+  }
+}
