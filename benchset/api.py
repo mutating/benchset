@@ -1,7 +1,10 @@
 """Python API with cancellation and a synchronized native-handle lifetime."""
 
 import math
-from threading import Lock
+import signal
+from dataclasses import replace
+from threading import RLock, current_thread, main_thread
+from types import FrameType
 from typing import Callable, Optional, Tuple
 
 from benchset._native import Native
@@ -22,8 +25,9 @@ class BenchmarkRunner:
     """
 
     def __init__(self) -> None:
-        self._lock = Lock()
-        self._active = False
+        # User signal handlers can reenter cancel() on the calling thread.
+        self._lock = RLock()
+        self._active: Optional[object] = None
         self._cancelled = False
         self._native: Optional[Native] = None
         self._handle: Optional[int] = None
@@ -52,50 +56,73 @@ class BenchmarkRunner:
             measurement_seconds=measurement_seconds,
         )
         if benchmark not in BENCHMARKS:
-            return self._failed(failure, 'unknown benchmark: ' + benchmark)
+            return replace(failure, reason='unknown benchmark: ' + benchmark)
         if not math.isfinite(warmup_seconds) or warmup_seconds < 0:
-            return self._failed(
-                failure, 'warmup_seconds must be finite and nonnegative',
+            return replace(
+                failure, reason='warmup_seconds must be finite and nonnegative',
             )
         if not math.isfinite(measurement_seconds) or measurement_seconds <= 0:
-            return self._failed(
-                failure, 'measurement_seconds must be finite and positive',
+            return replace(
+                failure, reason='measurement_seconds must be finite and positive',
             )
-        with self._lock:
-            if self._active:
-                return self._failed(failure, 'this runner is already running')
-            self._active = True
-            self._cancelled = False
         native: Optional[Native] = None
         handle: Optional[int] = None
+        interrupted = False
+        owner = object()
+
+        def interrupt(_signum: int, _frame: Optional[FrameType]) -> None:
+            nonlocal interrupted
+            interrupted = True
+            # The runner lock may already be held. Native cancellation is an
+            # atomic operation; the local handle is valid until cleanup starts.
+            if native is not None and handle is not None:
+                native.cancel(handle)
+
+        handles_signals = (
+            current_thread() is main_thread()
+            and signal.getsignal(signal.SIGINT) is signal.default_int_handler
+        )
         try:
-            native = Native()
-            handle = native.create()
-            with self._lock:
-                self._native = native
-                self._handle = handle
-                if self._cancelled:
-                    native.cancel(handle)
-            return native.execute(
-                handle, benchmark, warmup_seconds, measurement_seconds, on_progress,
-            )
-        except (OSError, RuntimeError, OverflowError) as error:
-            return self._failed(failure, str(error))
+            if handles_signals:
+                signal.signal(signal.SIGINT, interrupt)
+            try:
+                with self._lock:
+                    if self._active:
+                        return replace(failure, reason='this runner is already running')
+                    self._cancelled = False
+                    # One assignment publishes both activity and ownership,
+                    # even if a user signal handler raises immediately after.
+                    self._active = owner
+                native = Native()
+                handle = native.create()
+                with self._lock:
+                    self._native = native
+                    self._handle = handle
+                    if self._cancelled or interrupted:
+                        native.cancel(handle)
+                return native.execute(
+                    handle, benchmark, warmup_seconds, measurement_seconds, on_progress,
+                )
+            except (OSError, RuntimeError, OverflowError) as error:
+                return replace(failure, reason=str(error))
+            finally:
+                with self._lock:
+                    if self._active is owner:
+                        # Ownership starts at create(), before publication. Stop
+                        # signal-driven cancellation before freeing that handle.
+                        current, handle = handle, None
+                        self._handle = None
+                        self._native = None
+                        if native is not None and current is not None:
+                            native.free(current)
+                        self._active = None
         finally:
-            with self._lock:
-                # Ownership starts at create(), before the handle is published
-                # for cancel(). Interruptions during publication must free it.
-                if native is not None and handle is not None:
-                    native.free(handle)
-                self._handle = None
-                self._native = None
-                self._active = False
-
-    @staticmethod
-    def _failed(result: BenchmarkResult, reason: str) -> BenchmarkResult:
-        from dataclasses import replace  # noqa: PLC0415
-
-        return replace(result, reason=reason)
+            if handles_signals and signal.getsignal(signal.SIGINT) is interrupt:
+                signal.signal(signal.SIGINT, signal.default_int_handler)
+            if interrupted:
+                # Raising inside a ctypes callback would lose the exception.
+                # Wait until native workers are joined and the handle is freed.
+                raise KeyboardInterrupt
 
 
 def run(

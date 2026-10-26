@@ -60,6 +60,43 @@ class CSample(ctypes.Structure):
     ]
 
 
+class CResultV2(ctypes.Structure):
+    _fields_ = [  # noqa: RUF012 — ctypes layout, legacy prefix preserved.
+        *CResult._fields_,
+        ('pi_equivalent', ctypes.c_double),
+        ('has_pi_equivalent', ctypes.c_uint32),
+    ]
+
+
+class CReferenceMachine(ctypes.Structure):
+    _fields_ = [  # noqa: RUF012
+        ('name', ctypes.c_char_p),
+        ('short_name', ctypes.c_char_p),
+        ('os_name', ctypes.c_char_p),
+        ('os_version', ctypes.c_char_p),
+        ('cpu_architecture', ctypes.c_char_p),
+        ('memory_bytes', ctypes.c_uint64),
+        ('cpu_cores', ctypes.c_uint32),
+    ]
+
+
+class CReferenceRun(ctypes.Structure):
+    _fields_ = [  # noqa: RUF012
+        ('started_at_unix_seconds', ctypes.c_double),
+        ('start_temperature_c', ctypes.c_double),
+        ('end_temperature_c', ctypes.c_double),
+        ('warmup_seconds', ctypes.c_double),
+        ('result_count', ctypes.c_uint64),
+    ]
+
+
+class CReferenceBenchmarkResult(ctypes.Structure):
+    _fields_ = [  # noqa: RUF012
+        ('benchmark', ctypes.c_char_p),
+        ('score', ctypes.c_double),
+    ]
+
+
 Callback = ctypes.CFUNCTYPE(None, ctypes.POINTER(CProgress), ctypes.c_void_p)
 
 
@@ -72,9 +109,17 @@ class Native:
         )
         path = Path(__file__).parent / '_native' / filename
         self.lib = ctypes.CDLL(str(path))
+        # Check the fixed ABI/version entry points before resolving V2 symbols.
+        self.lib.benchset_abi_version.argtypes = []
+        self.lib.benchset_abi_version.restype = ctypes.c_uint32
+        self.lib.benchset_version.argtypes = []
+        self.lib.benchset_version.restype = ctypes.c_char_p
+        version = self.lib.benchset_version().decode('utf-8')
+        if self.lib.benchset_abi_version() != ABI_VERSION or version != __version__:
+            raise RuntimeError(
+                'native library version/ABI does not match the Python package',
+            )
         signatures = {
-            'benchset_abi_version': ([], ctypes.c_uint32),
-            'benchset_version': ([], ctypes.c_char_p),
             'benchset_create': ([], ctypes.c_void_p),
             'benchset_run': (
                 [ctypes.c_void_p, ctypes.POINTER(Config), Callback, ctypes.c_void_p],
@@ -85,6 +130,19 @@ class Native:
                 [ctypes.c_void_p, ctypes.POINTER(CResult)],
                 ctypes.c_int32,
             ),
+            'benchset_result_v2': (
+                [ctypes.c_void_p, ctypes.POINTER(CResultV2), ctypes.c_uint32],
+                ctypes.c_int32,
+            ),
+            'benchset_reference_machine': (
+                [ctypes.POINTER(CReferenceMachine), ctypes.c_uint32], ctypes.c_int32,
+            ),
+            'benchset_reference_run': (
+                [ctypes.POINTER(CReferenceRun), ctypes.c_uint32], ctypes.c_int32,
+            ),
+            'benchset_reference_result': (
+                [ctypes.c_uint64, ctypes.POINTER(CReferenceBenchmarkResult), ctypes.c_uint32], ctypes.c_int32,
+            ),
             'benchset_sample': (
                 [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(CSample)],
                 ctypes.c_int32,
@@ -93,14 +151,12 @@ class Native:
             'benchset_free': ([ctypes.c_void_p], None),
         }
         for name, (arguments, result) in signatures.items():
-            function = getattr(self.lib, name)
+            try:
+                function = getattr(self.lib, name)
+            except AttributeError as error:
+                raise RuntimeError('native library is missing required symbol: ' + name) from error
             function.argtypes = arguments
             function.restype = result
-        version = self.lib.benchset_version().decode('utf-8')
-        if self.lib.benchset_abi_version() != ABI_VERSION or version != __version__:
-            raise RuntimeError(
-                'native library version/ABI does not match the Python package',
-            )
 
     def create(self) -> int:
         handle = self.lib.benchset_create()
@@ -160,8 +216,8 @@ class Native:
         c_callback = Callback(callback)
         try:
             self.lib.benchset_run(handle, ctypes.byref(config), c_callback, None)
-            value = CResult()
-            if not self.lib.benchset_result(handle, ctypes.byref(value)):
+            value = CResultV2()
+            if not self.lib.benchset_result_v2(handle, ctypes.byref(value), ctypes.sizeof(value)):
                 raise RuntimeError('native library did not return a result')
             samples = []
             for index in range(value.sample_count):
@@ -196,6 +252,10 @@ class Native:
                 samples=tuple(samples),
                 variation_percent=value.variation_percent if value.has_variation else None,
                 unstable=bool(value.unstable),
+                pi_equivalent=(
+                    value.pi_equivalent
+                    if status == 'completed' and value.has_pi_equivalent else None
+                ),
             )
         finally:
             # Tracebacks retain the callback frame and its captured user data.
