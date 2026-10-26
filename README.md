@@ -317,7 +317,7 @@ consistency. Consumers decide which versions and measurement settings are compar
 
 ```toml
 [dependencies]
-benchset = "0.0.2"
+benchset = "0.0.3"
 # For changes from a local source checkout, use:
 # benchset = { path = "../benchset" }
 ```
@@ -432,7 +432,7 @@ the same repository. Rust is not required by the consumer.
 For a Swift manifest, add:
 
 ```swift
-.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.2"))
+.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.3"))
 ```
 
 Add `.product(name: "Benchset", package: "benchset")` to your target's
