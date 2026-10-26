@@ -307,11 +307,14 @@ and this reference configuration. The library reads these fixed values
 locally; it does not connect to the Pi, query sensors or require the original
 experiment directory.
 
-The Python package version is defined in `pyproject.toml`. `benchset.__version__`
-and result objects read the installed package metadata through
+The only editable package version is `[project].version` in `pyproject.toml`.
+The version values in `Cargo.toml`, the package's `Cargo.lock` entry and the
+Rust/Swift dependency pins below are generated copies. `benchset.__version__`
+and result objects read installed Python package metadata through
 `importlib.metadata`; no Python source version constant needs updating.
-The native library shares this version; builds check its Cargo metadata for
-consistency. Consumers decide which versions and measurement settings are comparable.
+Rust, C and Swift read the version compiled from the generated Cargo metadata.
+Builds and CI reject inconsistent copies. Consumers decide which versions and
+measurement settings are comparable.
 
 ## Embed in Rust
 
@@ -542,10 +545,16 @@ All distributions are released from this repository by
 `.github/workflows/release.yml`. A push to `main` checks the common package
 version. An unreleased version is built and published automatically; a version
 whose managed GitHub Release is already published is skipped. To release a new
-version, update `Cargo.toml` and `pyproject.toml` together,
-run `cargo generate-lockfile` to update `Cargo.lock`, commit the changes and
-push to `main`. Use an `X.Y.Z` version. Do not create or move release tags
-manually.
+version, run `python scripts/version.py 0.0.4` with the desired `X.Y.Z` version.
+It updates the canonical `pyproject.toml` value and synchronizes version values
+in the Cargo manifest, lockfile entry and README dependency pins. Alternatively, edit
+only `pyproject.toml` and run `python scripts/version.py` to refresh those copies.
+Commit the resulting changes and push to `main`. CI and Python/release builds
+reject stale copies with instructions to synchronize them. Run
+`python scripts/version.py --check` for the same read-only check locally. Cargo
+requires its own manifest version, so these generated copies stay committed for
+ordinary `cargo build`/`cargo package` without requiring Python. Do not create or
+move release tags manually.
 
 The workflow performs these steps:
 
