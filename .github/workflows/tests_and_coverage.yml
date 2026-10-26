@@ -4,6 +4,16 @@ on:
   push
 
 jobs:
+  versions:
+    name: Generated package versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python scripts/version.py --check
+
   rust_msrv:
     name: Rust minimum supported version
     runs-on: ubuntu-latest
