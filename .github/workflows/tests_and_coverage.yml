@@ -45,6 +45,10 @@ jobs:
 
     - uses: dtolnay/rust-toolchain@1.94.1
 
+    - name: Install both architectures for universal Apple package tests
+      if: runner.os == 'macOS'
+      run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
     - name: Set up uv
       uses: astral-sh/setup-uv@v7
       with:
