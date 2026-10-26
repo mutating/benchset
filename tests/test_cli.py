@@ -633,6 +633,17 @@ def test_missing_stderr_preserves_argument_error_status_with_legacy_argparse(
     assert cli.main(arguments) == 2
 
 
+@pytest.mark.parametrize('missing_stderr', [False, True])
+def test_missing_stdout_is_a_handled_error_even_without_stderr(
+    monkeypatch: pytest.MonkeyPatch, missing_stderr: bool,
+) -> None:
+    errors = io.StringIO()
+    monkeypatch.setattr(cli.sys, 'stdout', None)
+    monkeypatch.setattr(cli.sys, 'stderr', None if missing_stderr else errors)
+    assert cli.main(['--version']) == 1
+    assert errors.getvalue() == ('' if missing_stderr else 'benchset: error: standard output is unavailable\n')
+
+
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX file size limit')
 @pytest.mark.parametrize('destination', ['stdout', 'stderr', 'merged'])
 def test_file_output_failure_cannot_crash_error_reporting(
