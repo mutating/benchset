@@ -20,6 +20,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.version import sync_version
+
 NATIVE_TARGETS = (
     'aarch64-apple-darwin', 'x86_64-apple-darwin',
     'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu',
@@ -35,25 +40,7 @@ def git(root: Path, *arguments: str) -> str:
 
 
 def version(root: Path) -> str:
-    values = []
-    for filename, pattern in (
-        ('Cargo.toml', r'^version\s*=\s*"([^"]+)"'),
-        ('pyproject.toml', r'^version\s*=\s*"([^"]+)"'),
-    ):
-        match = re.search(pattern, (root / filename).read_text(), re.M)
-        if match is None:
-            raise ValueError('Missing package version in ' + filename)
-        values.append(match.group(1))
-    if len(set(values)) != 1:
-        raise ValueError('Cargo and Python metadata versions must match')
-    if re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', values[0]) is None:
-        raise ValueError('Automatic releases require an X.Y.Z version')
-    lockfile = root / 'Cargo.lock'
-    if lockfile.exists():
-        locked = re.search(r'name = "benchset"\s+version = "([^"]+)"', lockfile.read_text())
-        if locked is None or locked.group(1) != values[0]:
-            raise ValueError('Update Cargo.lock with cargo generate-lockfile before releasing')
-    return values[0]
+    return sync_version(root, check=True)
 
 
 def digest(path: Path) -> str:
