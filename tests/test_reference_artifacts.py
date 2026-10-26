@@ -51,7 +51,7 @@ def test_artifact_checks_collect_with_only_pytest_installed(tmp_path: Path) -> N
     (source / 'tests').mkdir()
     for name in ('__init__.py', 'helpers.py', 'test_reference_artifacts.py'):
         shutil.copy2(ROOT / 'tests' / name, source / 'tests' / name)
-    for name in ('README.md', 'Cargo.toml'):
+    for name in ('README.md', 'Cargo.toml', 'pyproject.toml'):
         shutil.copy2(ROOT / name, source / name)
 
     pending, copied = ['pytest'], set()
@@ -248,11 +248,11 @@ def test_unpacked_crate_builds_and_runs_a_public_rust_consumer(
 
 
 def test_documented_swift_dependency_pin_matches_the_package_version() -> None:
+    from scripts.version import read_version  # noqa: PLC0415
+
     pin = re.search(r'\.exact\("([^"]+)"\)', (ROOT / 'README.md').read_text(encoding='utf-8'))
-    version = re.search(r'^version = "([^"]+)"', (ROOT / 'Cargo.toml').read_text(encoding='utf-8'), re.MULTILINE)
     assert pin is not None
-    assert version is not None
-    assert pin.group(1) == version.group(1)
+    assert pin.group(1) == read_version(ROOT)
 
 
 def test_documented_cancellation_boundary_matches_runner_lifetime() -> None:
@@ -431,11 +431,24 @@ def test_installed_api_check_visits_both_workloads_and_accepts_only_exact_no_wor
 def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
     source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path,
 ) -> None:
+    from scripts.version import read_version  # noqa: PLC0415
+
     environment, _cargo, _target = rust_tools
+    versioned_source = tmp_path / 'versioned-source'
+    shutil.copytree(source_snapshot, versioned_source, ignore=shutil.ignore_patterns('target', 'build', 'dist'))
+    configuration = versioned_source / 'pyproject.toml'
+    original_version = read_version(versioned_source)
+    # A real future bump starts by editing only the canonical Python manifest.
+    configuration.write_text(configuration.read_text(encoding='utf-8').replace(
+        'version = "' + original_version + '"', 'version = "9.8.7"', 1,
+    ), encoding='utf-8')
+    execute([sys.executable, 'scripts/version.py'], versioned_source, environment)
+    execute([sys.executable, 'scripts/version.py', '--check'], versioned_source, environment)
     sdists = tmp_path / 'sdists'
     execute([sys.executable, '-m', 'build', '--sdist', '--outdir', str(sdists)],
-            source_snapshot, environment)
+            versioned_source, environment)
     archive = next(sdists.glob('*.tar.gz'))
+    assert archive.name == 'benchset-9.8.7.tar.gz'
     unpacked = tmp_path / 'unpacked'
     unpacked.mkdir()
     with tarfile.open(archive) as package:
@@ -447,6 +460,7 @@ def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
     execute([sys.executable, '-m', 'build', '--wheel', '--outdir', str(wheels), str(source)],
             tmp_path, environment)
     wheel = next(wheels.glob('*.whl'))
+    assert wheel.name.startswith('benchset-9.8.7-')
     with zipfile.ZipFile(wheel) as package:
         assert {'benchset/py.typed', 'benchset/reference.py', 'benchset/models.py'} <= set(package.namelist())
     virtualenv = tmp_path / 'venv'
@@ -462,6 +476,7 @@ def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
                              consumer, environment).strip()
     assert virtualenv.resolve() in Path(installed_path).resolve().parents
     for invocation in ([str(console)], [str(python), '-m', 'benchset']):
+        assert execute([*invocation, '--version'], consumer, environment) == '9.8.7\n'
         result = subprocess.run([*invocation, '--warmup', '0', '--duration', '0.05'],
                                 cwd=consumer, env=environment, capture_output=True,
                                 encoding='utf-8', check=False, timeout=300)

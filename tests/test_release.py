@@ -154,7 +154,7 @@ def test_incomplete_platform_matrix_is_rejected(source: Path) -> None:
 
 def test_stale_lockfile_is_rejected(source: Path) -> None:
     (source / 'Cargo.lock').write_text('[[package]]\nname = "benchset"\nversion = "0.0.0"\n')
-    with pytest.raises(ValueError, match='cargo generate-lockfile'):
+    with pytest.raises(ValueError, match=r'python scripts/version\.py'):
         release.version(source)
 
 
