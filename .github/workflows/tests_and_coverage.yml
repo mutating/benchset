@@ -49,6 +49,14 @@ jobs:
     - uses: ilammy/msvc-dev-cmd@v1
       if: runner.os == 'Windows'
 
+    - name: Keep Cargo on the MSVC linker when running in Git Bash
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $msvcLink = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64\link.exe'
+        if (!(Test-Path $msvcLink)) { throw "MSVC linker not found: $msvcLink" }
+        "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvcLink" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
     - name: Install both architectures for universal Apple package tests
       if: runner.os == 'macOS'
       run: rustup target add aarch64-apple-darwin x86_64-apple-darwin

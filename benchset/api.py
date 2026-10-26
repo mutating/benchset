@@ -40,6 +40,15 @@ class BenchmarkRunner:
             if self._native is not None and self._handle is not None:
                 self._native.cancel(self._handle)
 
+    def _release(self, owner: object, native: Optional[Native], handle: Optional[int]) -> None:
+        with self._lock:
+            if self._active is owner:
+                self._handle = None
+                self._native = None
+                if native is not None and handle is not None:
+                    native.free(handle)
+                self._active = None
+
     def run(
         self,
         benchmark: str,
@@ -106,16 +115,10 @@ class BenchmarkRunner:
             except (OSError, RuntimeError, OverflowError) as error:
                 return replace(failure, reason=str(error))
             finally:
-                with self._lock:
-                    if self._active is owner:
-                        # Ownership starts at create(), before publication. Stop
-                        # signal-driven cancellation before freeing that handle.
-                        current, handle = handle, None
-                        self._handle = None
-                        self._native = None
-                        if native is not None and current is not None:
-                            native.free(current)
-                        self._active = None
+                # Stop signal-driven cancellation before freeing this call's
+                # handle. _release preserves a concurrent call's ownership.
+                current, handle = handle, None
+                self._release(owner, native, current)
         finally:
             if handles_signals and signal.getsignal(signal.SIGINT) is interrupt:
                 signal.signal(signal.SIGINT, signal.default_int_handler)

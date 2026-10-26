@@ -160,7 +160,7 @@ int main(void) {
         assert(result.base.abi_version == BENCHSET_ABI_VERSION);
         assert(result.base.status == status);
         assert(result.base.benchmark == benchmark);
-        assert(result.has_pi_equivalent == (status == BENCHSET_COMPLETED));
+        assert(result.has_pi_equivalent == (status == BENCHSET_COMPLETED ? 1u : 0u));
         if (status == BENCHSET_COMPLETED) {
             assert(result.base.score > 0);
             assert(result.pi_equivalent == result.base.score / calibration[benchmark - 1].score);
@@ -210,7 +210,7 @@ int main(void) {
         benchset_cancel(handle);
         assert(benchset_result_v2(handle, &result, sizeof(result)) == 1);
         assert(result.base.status == status);
-        assert(result.has_pi_equivalent == (status == BENCHSET_COMPLETED));
+        assert(result.has_pi_equivalent == (status == BENCHSET_COMPLETED ? 1u : 0u));
         assert(benchset_result_v3(handle, &current.result, sizeof(current.result)) == 1);
         assert(current.result.reference_machine == canonical_machine);
         assert(current.result.reference_run == canonical_run);

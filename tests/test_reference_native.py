@@ -40,6 +40,8 @@ def compile_and_run_consumer(  # noqa: PLR0913 - explicit build inputs and execu
         command = [compiler, '/nologo', standard, '/MD', '/W4', '/WX',
                    '/I' + str(include_dir), str(source), str(link_library),
                    '/Fe' + str(executable)]
+        if is_cpp:
+            command.append('/EHsc')
     else:
         standard = '-std=c++11' if is_cpp else '-std=c11'
         command = [compiler, standard, '-Wall', '-Wextra', '-Werror',
@@ -85,6 +87,7 @@ def test_windows_consumers_select_the_msvc_compiler_for_msvc_libraries(
     compile_and_run_consumer(ROOT / 'tests/native' / source, ROOT / 'include', library, tmp_path)
     assert commands[0][0] == 'cl'
     assert '/WX' in commands[0]
+    assert ('/EHsc' in commands[0]) == source.endswith('.cpp')
 
 
 @pytest.mark.parametrize('case', [
