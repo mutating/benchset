@@ -82,6 +82,7 @@ print('Installed API: result references, JSON, typing and pi equivalents verifie
 
 def verify_cli(output, errors='', returncode=0, measurement_seconds=0.05):
     """Check completed results or the exact no-work failure of a short window."""
+    output, errors = output.replace('\r\n', '\n'), errors.replace('\r\n', '\n')
     names = ('single_core', 'multi_core')
     completed = output.rstrip().split('\n\n') if output else []
     failed = errors.rstrip().split('\n\n') if errors else []

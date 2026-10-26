@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Tuple
+from typing import Any, List, Tuple
 
 import pytest
 
@@ -19,6 +19,8 @@ def compile_and_run_consumer(  # noqa: PLR0913 - explicit build inputs and execu
     """Build and execute one public consumer, with a working directory outside checkout."""
     is_cpp = source.suffix == '.cpp'
     candidates = ('c++', 'clang++', 'g++', 'cl') if is_cpp else ('cc', 'clang', 'gcc', 'cl')
+    if sys.platform == 'win32':
+        candidates = ('cl',)  # The Windows release contains MSVC libraries.
     compiler = next((path for name in candidates if (path := shutil.which(name))), None)
     if compiler is None:
         pytest.skip('No C/C++ compiler is installed')
@@ -35,7 +37,7 @@ def compile_and_run_consumer(  # noqa: PLR0913 - explicit build inputs and execu
     is_msvc = Path(compiler).stem.lower() == 'cl'
     if is_msvc:
         standard = '/std:c++14' if is_cpp else '/std:c11'
-        command = [compiler, '/nologo', standard, '/W4', '/WX',
+        command = [compiler, '/nologo', standard, '/MD', '/W4', '/WX',
                    '/I' + str(include_dir), str(source), str(link_library),
                    '/Fe' + str(executable)]
     else:
@@ -63,6 +65,26 @@ def compile_and_run_consumer(  # noqa: PLR0913 - explicit build inputs and execu
     assert result.returncode == 0, result.stdout + result.stderr
     assert not result.stderr
     return result
+
+
+@pytest.mark.parametrize('source', ['reference.c', 'reference.cpp'])
+def test_windows_consumers_select_the_msvc_compiler_for_msvc_libraries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str,
+) -> None:
+    library = tmp_path / 'benchset.lib'
+    library.touch()
+    commands: List[List[str]] = []
+
+    def execute(command: List[str], **_options: Any) -> subprocess.CompletedProcess:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, '', '')
+
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(shutil, 'which', lambda name: name)
+    monkeypatch.setattr(subprocess, 'run', execute)
+    compile_and_run_consumer(ROOT / 'tests/native' / source, ROOT / 'include', library, tmp_path)
+    assert commands[0][0] == 'cl'
+    assert '/WX' in commands[0]
 
 
 @pytest.mark.parametrize('case', [

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, current_thread
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, TextIO, Tuple
 
 import pytest
 
@@ -32,6 +32,7 @@ def assert_short_cli_completed_or_no_work(
 ) -> None:
     output = result.stdout.decode(encoding) if isinstance(result.stdout, bytes) else result.stdout
     errors = result.stderr.decode(encoding) if isinstance(result.stderr, bytes) else result.stderr
+    output, errors = output.replace('\r\n', '\n'), errors.replace('\r\n', '\n')
     assert '\r' not in output + errors
     assert '\x1b' not in output + errors
     completed = output.rstrip().split('\n\n') if output else []
@@ -81,14 +82,15 @@ def assert_short_cli_completed_or_no_work(
 
 
 @pytest.mark.parametrize('encoding', ['ascii', 'cp1251', 'utf-8'])
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
 @pytest.mark.parametrize('errors', ['strict', 'backslashreplace'])
-def test_short_cli_no_work_check_uses_actual_stream_fallbacks(encoding: str, errors: str) -> None:
+def test_short_cli_no_work_check_uses_actual_stream_fallbacks(encoding: str, errors: str, newline: str) -> None:
     failed = BenchmarkResult(
         'single_core', status='failed', reason='measurement window was too short to complete any work',
         warmup_seconds=0, measurement_seconds=0.03,
     )
     buffer = io.BytesIO()
-    stream = io.TextIOWrapper(buffer, encoding=encoding, errors=errors)
+    stream = io.TextIOWrapper(buffer, encoding=encoding, errors=errors, newline=newline)
     cli.render(failed, stream)
     stream.flush()
     encoded_errors = buffer.getvalue()
@@ -326,7 +328,7 @@ def test_render_handles_real_stream_encodings_without_losing_values(encoding: st
     assert '123.500' in text
     assert ('0.5 \u00d7 pi' if encoding == 'utf-8' else '0.5 x pi') in text
     assert ('Причина' if encoding != 'ascii' else '\\u041f') in text
-    assert ('  —\n' if encoding != 'ascii' else '  -\n') in text
+    assert ('  —' if encoding != 'ascii' else '  -') in text.splitlines()
     stream.detach()
 
 
@@ -553,7 +555,13 @@ def test_closed_output_pipe_exits_without_traceback_or_shutdown_warning(
         os.close(writer)
     assert result.returncode == 1
     assert not result.stdout
-    assert not result.stderr
+    # Windows reports a closed anonymous pipe as EINVAL rather than EPIPE.
+    # Its diagnostic is valid; neither platform may print a traceback or fail
+    # a second time while flushing during interpreter shutdown.
+    if os.name == 'nt' and destination == 'stdout':
+        assert result.stderr == b'benchset: error: [Errno 22] Invalid argument\r\n'
+    else:
+        assert not result.stderr
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX file descriptor inheritance')
@@ -608,6 +616,21 @@ else:
         assert 'completed' in result.stdout
         assert '1 \u00d7 pi' in result.stdout
         assert not result.stderr
+
+
+@pytest.mark.parametrize('arguments', [['--duration=-1'], ['--unknown']])
+def test_missing_stderr_preserves_argument_error_status_with_legacy_argparse(
+    monkeypatch: pytest.MonkeyPatch, arguments: List[str],
+) -> None:
+    def legacy_print_message(_self: argparse.ArgumentParser, message: str, file: Optional[TextIO] = None) -> None:
+        if message:
+            if file is None:
+                file = sys.stderr
+            file.write(message)
+
+    monkeypatch.setattr(argparse.ArgumentParser, '_print_message', legacy_print_message)
+    monkeypatch.setattr(cli.sys, 'stderr', None)
+    assert cli.main(arguments) == 2
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX file size limit')

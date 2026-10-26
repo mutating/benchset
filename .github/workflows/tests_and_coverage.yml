@@ -22,6 +22,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-15-intel, ubuntu-latest, windows-latest]
         python-version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14', '3.14t', '3.15']
@@ -44,6 +45,9 @@ jobs:
           check-latest: ${{ matrix.python-version == '3.15' }}
 
     - uses: dtolnay/rust-toolchain@1.94.1
+
+    - uses: ilammy/msvc-dev-cmd@v1
+      if: runner.os == 'Windows'
 
     - name: Install both architectures for universal Apple package tests
       if: runner.os == 'macOS'

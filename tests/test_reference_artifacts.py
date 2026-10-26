@@ -201,7 +201,7 @@ def test_artifact_build_environment_isolates_outputs_without_changing_parent(
 
     environment, selected_cargo, _target = inspect.unwrap(rust_tools)()
 
-    assert selected_cargo == str(cargo)
+    assert Path(selected_cargo).samefile(cargo)
     assert all(variable not in environment for variable in inherited)
     assert all(os.environ[variable] == value for variable, value in inherited.items())
 
@@ -295,7 +295,7 @@ def test_installed_cli_verifier_accepts_supported_stream_encodings(encoding: str
     from benchset import PI_REFERENCE_RUN, BenchmarkResult, cli  # noqa: PLC0415
 
     buffer = io.BytesIO()
-    stream = io.TextIOWrapper(buffer, encoding=encoding)
+    stream = io.TextIOWrapper(buffer, encoding=encoding, newline='\n')
     for index, reference in enumerate(PI_REFERENCE_RUN.results):
         if index:
             stream.write('\n')
@@ -313,7 +313,7 @@ def render_installed_cli_result(result: benchset.BenchmarkResult, encoding: str 
     from benchset import cli  # noqa: PLC0415
 
     buffer = io.BytesIO()
-    stream = io.TextIOWrapper(buffer, encoding=encoding)
+    stream = io.TextIOWrapper(buffer, encoding=encoding, newline='\n')
     cli.render(result, stream)
     stream.flush()
     text = buffer.getvalue().decode(encoding)
@@ -331,6 +331,21 @@ def installed_cli_results() -> Tuple[benchset.BenchmarkResult, ...]:
         elapsed_seconds=0.05, workers=1, iterations=100, checksum=7,
         samples=(Sample(0.05, 0.05, 100, 2000),),
     ) for reference in PI_REFERENCE_RUN.results)
+
+
+@pytest.mark.parametrize('completed_count', [0, 1, 2])
+def test_installed_cli_verifier_accepts_windows_line_endings(
+    installed_cli_results: Tuple[benchset.BenchmarkResult, ...], completed_count: int,
+) -> None:
+    output = '\n'.join(render_installed_cli_result(result)
+                       for result in installed_cli_results[:completed_count])
+    errors = ''
+    if completed_count < 2:
+        failed = replace(installed_cli_results[completed_count], status='failed',
+                         reason='measurement window was too short to complete any work',
+                         score=None, pi_equivalent=None, iterations=0, checksum=0, samples=())
+        errors = render_installed_cli_result(failed)
+    verify_cli(output.replace('\n', '\r\n'), errors.replace('\n', '\r\n'), int(completed_count < 2))
 
 
 @pytest.mark.parametrize('encoding', ['utf-8', 'ascii', 'cp1251'])

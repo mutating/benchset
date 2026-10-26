@@ -9,7 +9,7 @@ import signal
 import sys
 from threading import Event, Thread, current_thread, main_thread
 from types import FrameType
-from typing import Dict, List, Optional, TextIO
+from typing import Dict, List, NoReturn, Optional, TextIO
 
 from skelet import Field, FixedCLISource, Storage
 
@@ -45,9 +45,16 @@ def _seconds(value: str) -> str:
     return value
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        if sys.stderr is None:
+            raise SystemExit(2)
+        super().error(message)
+
+
 def settings(argv: List[str]) -> Settings:
     source = _Arguments(named_arguments=['bench', 'warmup', 'duration'])
-    source.parser = argparse.ArgumentParser(
+    source.parser = _Parser(
         prog='benchset', argument_default=argparse.SUPPRESS,
         description='Sustained scalar CPU throughput and speed relative to Raspberry Pi 5.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
