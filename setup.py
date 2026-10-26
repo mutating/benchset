@@ -1,6 +1,5 @@
 """Build an interpreter-independent platform wheel containing the Rust CDylib."""
 import platform
-import re
 import shutil
 import struct
 import subprocess
@@ -12,6 +11,7 @@ from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
 
 from scripts.build_backend import rust_environment
+from scripts.version import sync_version
 
 ROOT = Path(__file__).parent.resolve()
 
@@ -40,9 +40,8 @@ class NativeDistribution(Distribution):
 class BuildNative(build_py):
     def run(self):
         super().run()
-        native_version = re.search(r'^version\s*=\s*[\'"]([^\'"]+)', (ROOT / 'Cargo.toml').read_text(), re.M).group(1)
-        if native_version != self.distribution.get_version():
-            raise RuntimeError('Cargo and Python metadata versions must match')
+        if sync_version(ROOT, check=True) != self.distribution.get_version():
+            raise RuntimeError('Python build metadata does not match project.version')
         target = rust_target()
         environment = rust_environment(ROOT, target)
         cargo = shutil.which('cargo', path=environment.get('PATH'))
