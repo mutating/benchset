@@ -505,7 +505,7 @@ def test_real_terminal_disconnect_has_execution_failure_exit_without_traceback(
     os.close(slave)
     try:
         observed = b''
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + CLI_PROCESS_TIMEOUT
         while b'\rsingle_core: measurement' not in observed and time.monotonic() < deadline:
             readable, _writeable, _errors = select.select([master], [], [], 0.1)
             if readable:
@@ -735,7 +735,7 @@ def test_real_ctrl_c_cancels_each_phase_and_stops_the_suite(
     os.close(slave)
     try:
         observed = b''
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + CLI_PROCESS_TIMEOUT
         while phase.encode() not in observed and time.monotonic() < deadline:
             readable, _writeable, _errors = select.select([master], [], [], 0.1)
             if readable:
