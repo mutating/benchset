@@ -371,6 +371,59 @@ struct BenchsetTests {
         #expect(stub.creates == 2 && stub.frees == 2 && stub.cancels == 0)
     }
 
+    @Test func cleanupWaitsForAnInFlightNativeCancellation() throws {
+        let stub = NativeStub()
+        let running = DispatchSemaphore(value: 0)
+        let releaseRun = DispatchSemaphore(value: 0)
+        let cancelling = DispatchSemaphore(value: 0)
+        let releaseCancel = DispatchSemaphore(value: 0)
+        let freed = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        let cancelDone = DispatchSemaphore(value: 0)
+        let cancelInFlight = LockedBox(false)
+        let output = LockedBox<Result<BenchmarkResult, Error>?>(nil)
+        stub.action = { _, _ in
+            running.signal()
+            #expect(releaseRun.wait(timeout: .now() + 5) == .success)
+        }
+        var native = stub.api
+        native.cancel = { handle in
+            #expect(handle == stub.pointer)
+            cancelInFlight.value = true
+            cancelling.signal()
+            #expect(releaseCancel.wait(timeout: .now() + 5) == .success)
+            cancelInFlight.value = false
+        }
+        native.free = { handle in
+            #expect(handle == stub.pointer)
+            #expect(!cancelInFlight.value, "free must not overlap a native call using the handle")
+            stub.frees += 1
+            freed.signal()
+        }
+        let runner = BenchmarkRunner(native: native)
+        defer { releaseRun.signal(); releaseCancel.signal() }
+        DispatchQueue.global().async {
+            output.value = Result { try runner.run(.singleCore) }
+            finished.signal()
+        }
+        #expect(running.wait(timeout: .now() + 5) == .success)
+        DispatchQueue.global().async {
+            runner.cancel()
+            cancelDone.signal()
+        }
+        #expect(cancelling.wait(timeout: .now() + 5) == .success)
+        releaseRun.signal()
+        // Give cleanup a chance to attempt free while cancellation owns the
+        // handle. The assertion in free checks actual overlap, not elapsed time.
+        _ = freed.wait(timeout: .now() + 0.2)
+        releaseCancel.signal()
+        #expect(cancelDone.wait(timeout: .now() + 5) == .success)
+        #expect(finished.wait(timeout: .now() + 5) == .success)
+        let result = try #require(output.value)
+        #expect(try result.get().success)
+        #expect(stub.frees == 1)
+    }
+
     @Test func terminalCancellationKeepsCompletedResult() throws {
         let runner = BenchmarkRunner()
         let result = try runner.run(.singleCore, warmupSeconds: 0, measurementSeconds: 0.03) {

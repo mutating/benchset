@@ -49,6 +49,8 @@ fn assert_recovered() {
 
 #[test]
 fn public_defaults_names_and_shared_cancellation() {
+    assert_eq!(DEFAULT_WARMUP_SECONDS, 120.0);
+    assert_eq!(DEFAULT_MEASUREMENT_SECONDS, 60.0);
     assert_eq!(Benchmark::SingleCore.name(), "single_core");
     assert_eq!(Benchmark::MultiCore.name(), "multi_core");
     assert_eq!(
@@ -141,6 +143,13 @@ fn real_runs_account_for_work_and_progress_on_caller() {
             assert!((0.0..=1.0).contains(&p.fraction));
             if matches!(p.phase, Phase::Warmup | Phase::Measurement) {
                 assert!(p.phase_elapsed_seconds <= p.phase_duration_seconds);
+                let elapsed = p.phase_elapsed_seconds
+                    + if p.phase == Phase::Measurement {
+                        0.02
+                    } else {
+                        0.0
+                    };
+                assert!((p.fraction - (elapsed / 0.06).min(1.0)).abs() < 1e-12);
             } else {
                 assert_eq!(p.phase_elapsed_seconds, result.elapsed_seconds);
             }
@@ -806,4 +815,178 @@ fn final_sample_repairs_snapshot_after_worker_finish() {
             );
         }
     }
+}
+
+#[test]
+fn timing_uses_half_open_phases_and_periodic_measurement_samples() {
+    let start = Instant::now();
+    let times = Timing {
+        start,
+        warm_end: start + Duration::from_secs(1),
+        end: start + Duration::from_secs(5),
+    };
+    assert!(times.is_warmup(times.warm_end - Duration::from_nanos(1)));
+    assert!(!times.is_warmup(times.warm_end));
+    assert!(!times.is_warmup(times.end));
+    assert!(!Timing {
+        warm_end: start,
+        ..times
+    }
+    .is_warmup(start));
+    for (offset_ns, last_elapsed, expected) in [
+        (0, 0.0, None),
+        (1_000_000_000, 0.0, None),
+        (1_999_999_999, 0.0, None),
+        (2_000_000_000, 0.0, Some(1.0)),
+        (2_100_000_000, 1.0, None),
+        (2_500_000_000, 0.5, Some(1.5)),
+        (3_000_000_000, 1.0, Some(2.0)),
+        (5_000_000_000, 0.0, None),
+        (5_000_000_001, 0.0, None),
+    ] {
+        assert_eq!(
+            times.sample_elapsed(start + Duration::from_nanos(offset_ns), last_elapsed),
+            expected
+        );
+    }
+}
+
+#[test]
+fn cancelled_warmup_excludes_work_and_reports_elapsed_fraction() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let token = Cancellation::default();
+    let before = Instant::now();
+    let mut events = Vec::new();
+    let mut observed_work = false;
+    let result = run(
+        Benchmark::SingleCore,
+        Options {
+            warmup: Duration::from_secs(10),
+            measurement: Duration::from_secs(20),
+        },
+        &token,
+        |p| {
+            events.push(p);
+            if p.phase == Phase::Warmup && p.iterations > 0 {
+                observed_work = true;
+                token.cancel();
+            } else if p.phase == Phase::Measurement {
+                token.cancel();
+            }
+        },
+    );
+    assert!(observed_work, "warmup must publish its completed work");
+    assert_eq!(result.status, Status::Cancelled);
+    assert_eq!(
+        result.iterations, 0,
+        "warmup work must not enter measurement"
+    );
+    assert_eq!(result.elapsed_seconds, 0.0);
+    let final_event = events.last().unwrap();
+    assert_eq!(final_event.phase, Phase::Cancelled);
+    assert!(final_event.fraction > 0.0);
+    assert!(final_event.fraction <= before.elapsed().as_secs_f64() / 30.0 + 1e-12);
+    assert!(result.score.is_none() && result.pi_equivalent.is_none());
+}
+
+#[test]
+fn observed_measurement_time_produces_periodic_samples_before_the_tail() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let token = Cancellation::default();
+    let mut observed_snapshot = None;
+    let mut previous_progress = None;
+    let result = run(
+        Benchmark::SingleCore,
+        Options {
+            warmup: Duration::ZERO,
+            measurement: Duration::from_secs(10),
+        },
+        &token,
+        |p| {
+            if p.phase == Phase::Measurement {
+                if let Some(previous) = previous_progress {
+                    assert!(
+                        p.phase_elapsed_seconds - previous >= 0.1 - 1e-9,
+                        "same-phase progress must be throttled to 10 Hz"
+                    );
+                }
+                previous_progress = Some(p.phase_elapsed_seconds);
+            }
+            if p.phase == Phase::Measurement && p.phase_elapsed_seconds >= 1.0 {
+                let first = *observed_snapshot.get_or_insert(p.phase_elapsed_seconds);
+                if p.phase_elapsed_seconds - first >= 0.2 {
+                    token.cancel();
+                }
+            }
+        },
+    );
+    assert_eq!(result.status, Status::Cancelled);
+    assert!(
+        result.samples.len() >= 2,
+        "an observed snapshot must precede the cancellation tail"
+    );
+    assert!(result.samples[0].elapsed_seconds <= observed_snapshot.unwrap());
+    assert!(result.samples[..result.samples.len() - 1]
+        .iter()
+        .all(|s| s.duration_seconds >= 1.0));
+}
+
+#[test]
+fn callback_panic_stops_already_running_workers_before_the_deadline() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let token = Cancellation::default();
+    let cleanup = token.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(|| {
+            run(
+                Benchmark::SingleCore,
+                Options {
+                    warmup: Duration::from_secs(60),
+                    measurement: Duration::from_secs(60),
+                },
+                &token,
+                |p| {
+                    if p.phase == Phase::Warmup && p.iterations > 0 {
+                        panic!("callback fault after observed work");
+                    }
+                },
+            )
+        });
+        done_tx.send(outcome.is_err()).unwrap();
+    });
+    let stopped = done_rx.recv_timeout(Duration::from_secs(5));
+    // Always unblock a broken worker before asserting, including on a mutant.
+    cleanup.cancel();
+    worker.join().unwrap();
+    assert!(stopped.unwrap());
+    assert_recovered();
+}
+
+#[test]
+fn counter_aggregation_preserves_measurement_work_max_finish_and_xor() {
+    let counters: Vec<_> = [
+        (50, 8, 2_000_000_000, 0b1100),
+        (500, 16, 1_500_000_000, 0b1010),
+    ]
+    .into_iter()
+    .map(|(warmup, measurement, finish, checksum)| {
+        Arc::new(Counters {
+            warmup: AtomicU64::new(warmup),
+            measurement: AtomicU64::new(measurement),
+            finish_ns: AtomicU64::new(finish),
+            checksum: AtomicU64::new(checksum),
+        })
+    })
+    .collect();
+    let mut result = fresh_result();
+    collect_counters(&mut result, &counters);
+    assert_eq!(result.iterations, 24);
+    assert_eq!(result.elapsed_seconds, 2.0);
+    assert_eq!(result.checksum, 0b0110);
+    collect_counters(&mut result, &[]);
+    assert_eq!(
+        (result.iterations, result.elapsed_seconds, result.checksum),
+        (0, 0.0, 0)
+    );
 }

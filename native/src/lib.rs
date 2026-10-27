@@ -169,6 +169,20 @@ struct Timing {
     end: Instant,
 }
 
+impl Timing {
+    fn is_warmup(self, now: Instant) -> bool {
+        now < self.warm_end
+    }
+
+    fn sample_elapsed(self, now: Instant, last_elapsed: f64) -> Option<f64> {
+        if self.is_warmup(now) || now >= self.end {
+            return None;
+        }
+        let elapsed = now.duration_since(self.warm_end).as_secs_f64();
+        (elapsed - last_elapsed >= 1.0).then_some(elapsed)
+    }
+}
+
 struct Workers {
     handles: Vec<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -319,7 +333,7 @@ fn run_with(
                     {
                         break;
                     }
-                    let warmup = now < times.warm_end;
+                    let warmup = times.is_warmup(now);
                     // Publish once per eight iterations, never contend on a shared counter.
                     for _ in 0..8 {
                         checksum = kernel.step();
@@ -387,24 +401,21 @@ fn run_with(
     let mut last_sample_iterations = 0;
     loop {
         let now = Instant::now();
-        let warmup = now < times.warm_end;
+        let warmup = times.is_warmup(now);
         let (phase, phase_start, phase_duration) = if warmup {
             (Phase::Warmup, times.start, options.warmup)
         } else {
             (Phase::Measurement, times.warm_end, options.measurement)
         };
         let iterations = sum(&counters, warmup);
-        if phase == Phase::Measurement {
-            let elapsed = now.saturating_duration_since(times.warm_end).as_secs_f64();
-            if elapsed - last_sample_elapsed >= 1.0 && now < times.end {
-                append_sample(
-                    &mut result.samples,
-                    elapsed,
-                    iterations,
-                    &mut last_sample_elapsed,
-                    &mut last_sample_iterations,
-                );
-            }
+        if let Some(elapsed) = times.sample_elapsed(now, last_sample_elapsed) {
+            append_sample(
+                &mut result.samples,
+                elapsed,
+                iterations,
+                &mut last_sample_elapsed,
+                &mut last_sample_iterations,
+            );
         }
         if last_phase != phase || now.duration_since(last_progress) >= Duration::from_millis(100) {
             on_progress(Progress {
@@ -433,16 +444,7 @@ fn run_with(
     for handle in workers.handles.drain(..) {
         panicked |= handle.join().is_err();
     }
-    result.iterations = sum(&counters, false);
-    result.elapsed_seconds = counters
-        .iter()
-        .map(|c| c.finish_ns.load(Ordering::Relaxed))
-        .max()
-        .unwrap_or(0) as f64
-        / 1e9;
-    result.checksum = counters
-        .iter()
-        .fold(0, |value, c| value ^ c.checksum.load(Ordering::Relaxed));
+    collect_counters(&mut result, &counters);
     finish_samples(&mut result);
     finish_result(&mut result, panicked, cancellation.is_cancelled());
     on_progress(Progress {
@@ -467,6 +469,19 @@ fn run_with(
 fn release(gate: &(std::sync::Mutex<bool>, std::sync::Condvar)) {
     *gate.0.lock().unwrap() = true;
     gate.1.notify_all();
+}
+
+fn collect_counters(result: &mut BenchmarkResult, counters: &[Arc<Counters>]) {
+    result.iterations = sum(counters, false);
+    result.elapsed_seconds = counters
+        .iter()
+        .map(|c| c.finish_ns.load(Ordering::Relaxed))
+        .max()
+        .unwrap_or(0) as f64
+        / 1e9;
+    result.checksum = counters
+        .iter()
+        .fold(0, |value, c| value ^ c.checksum.load(Ordering::Relaxed));
 }
 
 fn sum(counters: &[Arc<Counters>], warmup: bool) -> u64 {

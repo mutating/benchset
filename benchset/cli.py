@@ -53,7 +53,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def settings(argv: List[str]) -> Settings:
-    source = _Arguments(named_arguments=['bench', 'warmup', 'duration'])
+    source = _Arguments(named_arguments=[])
     source.parser = _Parser(
         prog='benchset', argument_default=argparse.SUPPRESS,
         description='Sustained scalar CPU throughput and speed relative to Raspberry Pi 5.',
