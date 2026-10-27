@@ -57,8 +57,12 @@ def compile_and_run_consumer(  # noqa: PLR0913 - explicit build inputs and execu
     compiled = subprocess.run(command, cwd=working_dir, capture_output=True, text=True, check=False)
     assert compiled.returncode == 0, compiled.stdout + compiled.stderr
     environment = os.environ.copy()
-    for variable in ('DYLD_LIBRARY_PATH', 'LD_LIBRARY_PATH', 'PATH'):
-        environment[variable] = str(library.parent) + os.pathsep + environment.get(variable, '')
+    # Unix consumers use the linked runtime search path. Loader environment
+    # overrides would hide a library's embedded build-machine install name.
+    for variable in ('DYLD_LIBRARY_PATH', 'LD_LIBRARY_PATH'):
+        environment.pop(variable, None)
+    if os.name == 'nt':
+        environment['PATH'] = str(library.parent) + os.pathsep + environment.get('PATH', '')
     result = subprocess.run([str(executable)], cwd=working_dir, env=environment,
                             capture_output=True, text=True, timeout=30, check=False)
     if (allow_no_work and result.returncode == 1 and 'Reference:' in result.stdout

@@ -590,6 +590,22 @@ def native_bundle(source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, 
     return directory
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Mach-O install names and code signing')
+@pytest.mark.parametrize('target', ['aarch64-apple-darwin', 'x86_64-apple-darwin'])
+def test_macos_native_zip_has_relocatable_install_name_and_valid_signature(
+    source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path, target: str,
+) -> None:
+    environment, _cargo, _host = rust_tools
+    execute([sys.executable, 'scripts/package_native.py', '--target', target], source_snapshot, environment)
+    archive = source_snapshot / 'release-artifacts' / ('benchset-' + target + '.zip')
+    with zipfile.ZipFile(archive) as package:
+        package.extractall(tmp_path)
+    library = tmp_path / 'lib/libbenchset.dylib'
+    identity = execute(['otool', '-D', str(library)], tmp_path, dict(os.environ))
+    assert identity.splitlines()[1:] == ['@rpath/libbenchset.dylib']
+    execute(['codesign', '--verify', '--strict', str(library)], tmp_path, dict(os.environ))
+
+
 def test_unpacked_native_zip_links_its_public_header_and_library(
     native_bundle: Path, tmp_path: Path,
 ) -> None:
