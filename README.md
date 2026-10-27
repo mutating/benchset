@@ -424,7 +424,9 @@ also be required. Obtain their list with
 `cargo rustc --release -- --print=native-static-libs`. Dynamic consumers must
 ship the matching platform library with their application. Source consumers
 control their compiler/toolchain settings; use our release artifacts for a
-consistent build policy.
+consistent build policy. The macOS dynamic library uses the install name
+`@rpath/libbenchset.dylib`; add its directory to your application's runtime
+search path (for example, `-Wl,-rpath,/path/to/benchset/lib` when linking).
 
 ## Embed in Swift on macOS
 

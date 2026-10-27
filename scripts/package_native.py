@@ -40,7 +40,12 @@ def main():
     for filename in ('libbenchset.a', 'benchset.lib', 'libbenchset.dylib', 'libbenchset.so',
                      'benchset.dll', 'benchset.dll.lib'):
         if (source / filename).exists():
-            shutil.copy2(source / filename, staging / 'lib' / filename)
+            destination = staging / 'lib' / filename
+            shutil.copy2(source / filename, destination)
+            if filename.endswith('.dylib'):
+                subprocess.run(['install_name_tool', '-id', '@rpath/' + filename, str(destination)], check=True)
+                # Ship a valid ad-hoc signature for both Apple architectures.
+                subprocess.run(['codesign', '--force', '--sign', '-', str(destination)], check=True)
     shutil.copytree(ROOT / 'include', staging / 'include', dirs_exist_ok=True)
     for filename in ('README.md', 'LICENSE'):
         shutil.copy2(ROOT / filename, staging / filename)
