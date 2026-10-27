@@ -198,23 +198,28 @@ class ManagedNative(Native):
 
 
 @pytest.mark.parametrize('entrypoint', ['runner', 'run', 'run_all'])
-def test_public_api_forwards_default_durations_without_running_long_benchmarks(
-    monkeypatch: pytest.MonkeyPatch, entrypoint: str,
+@pytest.mark.parametrize('durations', [None, (1.2345678901234567, 9.876543210987654)])
+def test_public_api_forwards_durations_and_callback_without_running_long_benchmarks(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: str, durations: Optional[Tuple[float, float]],
 ) -> None:
     backend = ManagedNative()
     monkeypatch.setattr(api, 'Native', lambda: backend)
+    options = {} if durations is None else {'warmup_seconds': durations[0], 'measurement_seconds': durations[1]}
+    expected_durations = (120.0, 60.0) if durations is None else durations
+    events: List[Progress] = []
     results: Tuple[BenchmarkResult, ...]
     if entrypoint == 'runner':
-        results = (BenchmarkRunner().run('single_core'),)
+        results = (BenchmarkRunner().run('single_core', on_progress=events.append, **options),)
     elif entrypoint == 'run':
-        results = (run('single_core'),)
+        results = (run('single_core', on_progress=events.append, **options),)
     else:
-        results = run_all()
+        results = run_all(on_progress=events.append, **options)
     for result in results:
         assert_result_references(result)
     benchmarks = ['single_core', 'multi_core'] if entrypoint == 'run_all' else ['single_core']
     assert [(result.benchmark, result.warmup_seconds, result.measurement_seconds)
-            for result in results] == [(benchmark, 120.0, 60.0) for benchmark in benchmarks]
+            for result in results] == [(benchmark, *expected_durations) for benchmark in benchmarks]
+    assert [event.benchmark for event in events] == benchmarks
     assert all(result.success for result in results)
     assert backend.calls == ['create', 'execute', 'free'] * len(benchmarks)
 
