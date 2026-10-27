@@ -61,6 +61,7 @@ def assert_short_cli_completed_or_no_work(
         assert float(fields['Measurement seconds']) == 0.03
         assert fields['Unit'] == 'iterations/s'
         if index < len(completed):
+            assert fields['Reason'] in ('—', '-', '\\u2014')
             assert fields['Status'] == 'completed'
             number, unit = fields['Pi equivalent'].split(' \u00d7 ' if encoding == 'utf-8' else ' x ')
             assert float(number) > 0
@@ -231,7 +232,7 @@ def test_real_entrypoints_accept_selection_order_numeric_forms_and_redirected_ou
 
 
 def test_defaults_repeated_options_and_environment_independence(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     calls: List[Tuple[str, float, float]] = []
 
@@ -245,10 +246,92 @@ def test_defaults_repeated_options_and_environment_independence(
     monkeypatch.setenv('BENCHSET_DURATION', '0')
     assert cli.main([]) == 0
     assert calls == [('single_core', 120, 60), ('multi_core', 120, 60)]
+    output = capsys.readouterr()
+    assert not output.err
+    sections = output.out.rstrip('\n').split('\n\n')
+    assert len(sections) == 2
+    assert sections[0].startswith('Benchmark')
+    assert sections[1].startswith('Benchmark')
+    assert output.out.endswith('  —\n')
     calls.clear()
     assert cli.main(['--bench=all', '--bench', 'multi_core', '--warmup=0.5', '--warmup=-0.0',
                      '--duration=2', '--duration', '+.03']) == 0
     assert calls == [('multi_core', -0.0, 0.03)]
+
+
+@pytest.mark.parametrize(('arguments', 'message'), [
+    (['--warmup=oops'], 'argument --warmup: must be a number of seconds'),
+    (['--duration=oops'], 'argument --duration: must be a number of seconds'),
+    (['--warmup', '-1e-3'], '--warmup must be finite and nonnegative'),
+    (['--warmup=nan'], '--warmup must be finite and nonnegative'),
+    (['--duration=0'], '--duration must be finite and positive'),
+    (['--duration', '-NaN'], '--duration must be finite and positive'),
+])
+def test_programmatic_cli_rejects_invalid_durations_with_option_diagnostic(
+    arguments: List[str], message: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(arguments) == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err.startswith('usage: benchset ')
+    assert captured.err.splitlines()[-1] == 'benchset: error: ' + message
+
+
+def test_cli_help_keeps_explanations_and_copyable_examples_on_separate_lines(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('COLUMNS', '80')
+    # A calling application's argv must not change the CLI's displayed name.
+    monkeypatch.setattr(sys, 'argv', ['embedding-application'])
+    assert cli.main(['--help']) == 0
+    captured = capsys.readouterr()
+    assert not captured.err
+    paragraphs = captured.out.strip().split('\n\n')
+    assert paragraphs[0].startswith('usage: benchset ')
+    assert paragraphs[1] == 'Sustained scalar CPU throughput and speed relative to Raspberry Pi 5.'
+    assert paragraphs[-2].splitlines() == [
+        'Higher iterations/s is faster. Pi equivalent: 0.5 = half the Pi speed; 2 = twice.',
+        'With no options, runs single_core then multi_core (about 6 minutes total).',
+        'Ctrl+C cancels the run.',
+        'Exit codes: 0 success, 1 failed, 2 invalid arguments, 130 cancelled.',
+    ]
+    assert paragraphs[-1].splitlines() == [
+        'Examples:',
+        '  benchset --bench single_core',
+        '  benchset --bench multi_core --warmup 120 --duration 60',
+        '  benchset --warmup 0 --duration 1  # quick smoke test',
+    ]
+    options = ' '.join(paragraphs[2].split())
+    for entry in (
+        '--bench {all,single_core,multi_core} Benchmark to run (default: all).',
+        '--warmup SECONDS Warmup excluded from the score (default: 120; zero allowed).',
+        '--duration SECONDS Measurement duration, must be positive (default: 60).',
+    ):
+        assert entry in options
+
+
+@pytest.mark.parametrize('benchmark', ['single_core', 'multi_core'])
+def test_cli_worker_exception_retains_benchmark_and_stops_the_suite(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], benchmark: str,
+) -> None:
+    calls: List[str] = []
+
+    def fail(_runner: BenchmarkRunner, name: str, **_options: object) -> BenchmarkResult:
+        calls.append(name)
+        raise RuntimeError('backend unavailable')
+
+    monkeypatch.setattr(BenchmarkRunner, 'run', fail)
+    assert cli.main(['--bench', benchmark]) == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    fields = {key.strip(): value for key, value in (
+        line.split(' : ', 1) for line in captured.err.split('Samples:\n')[0].splitlines()
+    )}
+    assert fields['Benchmark'] == benchmark
+    assert fields['Status'] == 'failed'
+    assert fields['Reason'] == 'backend unavailable'
+    assert fields['Score'] == fields['Pi equivalent'] == '—'
+    assert calls == [benchmark]
 
 
 @pytest.mark.parametrize('arguments', [
@@ -360,6 +443,12 @@ def test_result_calibration_links_keep_cli_output_compact(status: str) -> None:
     assert text.count('Reference machine') == 1
     assert f'{result.reference_machine.name} ({result.reference_machine.short_name})' in text
     assert 'Pi equivalent' in text
+    fields = {key.strip(): value for key, value in (
+        line.split(' : ', 1) for line in text.split('Samples:\n')[0].splitlines()
+    )}
+    for name in ('Reason', 'Score', 'Pi equivalent', 'Variation percent'):
+        assert fields[name] == '—'
+    assert text.endswith('Samples:\n  —\n')
     for nested_metadata in ('reference_machine', 'reference_run', 'ReferenceMachine(', 'ReferenceRun(',
                             'started_at_unix_seconds', 'start_temperature_c', 'warmup_seconds=1248'):
         assert nested_metadata not in text
@@ -716,6 +805,24 @@ def test_error_report_write_failure_does_not_escape(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, '_main', fail)
     monkeypatch.setattr(cli.sys, 'stderr', Unavailable())
     assert cli.main([]) == 1
+
+
+def test_missing_stdout_still_redirects_a_broken_stderr_at_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Broken(io.StringIO):
+        def flush(self) -> None:
+            raise OSError('destination is unavailable')
+
+        def fileno(self) -> int:
+            return 42
+
+    redirects: List[int] = []
+    monkeypatch.setattr(cli.sys, 'stdout', None)
+    monkeypatch.setattr(cli.sys, 'stderr', Broken())
+    monkeypatch.setattr(cli.os, 'dup2', lambda _source, target: redirects.append(target))
+    assert cli.main([]) == 1
+    assert redirects == [42]
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal signals; Windows cancellation has direct tests')
