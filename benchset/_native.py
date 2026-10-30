@@ -237,7 +237,10 @@ class Native:
             message = reason.decode('utf-8') if reason else None
             if callback_errors:
                 status = 'failed'
-                message = f'progress callback failed: {type(callback_errors[0]).__name__}: {callback_errors[0]}'
+                try:
+                    message = f'progress callback failed: {type(callback_errors[0]).__name__}: {callback_errors[0]}'
+                except BaseException:  # noqa: BLE001 — User exception formatters can fail too.
+                    message = f'progress callback failed: {type(callback_errors[0]).__name__}'
             return BenchmarkResult(
                 benchmark=benchmark,
                 status=status,

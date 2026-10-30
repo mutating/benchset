@@ -1,5 +1,7 @@
 /* Public C consumer: compile independently against the installed C header. */
 #include "benchset.h"
+/** Repeated indirect inclusion must preserve a valid, self-contained C interface. */
+#include "benchset.h"
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>

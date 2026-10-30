@@ -11,6 +11,9 @@ use std::time::Duration;
 
 const ABI_VERSION: u32 = 1;
 
+#[path = "suite_ffi.rs"]
+mod suite;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -440,13 +443,17 @@ pub unsafe extern "C" fn benchset_result_v3(
         Some(stored) => &stored.result,
         None => return 0,
     };
+    out.write(linked_result(result));
+    1
+}
+
+fn linked_result(result: &BenchmarkResult) -> CResultV3 {
     let views = reference_views();
-    out.write(CResultV3 {
+    CResultV3 {
         base: extended_result(result),
         reference_machine: &views.machine,
         reference_run: &views.run,
-    });
-    1
+    }
 }
 
 #[no_mangle]

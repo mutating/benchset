@@ -13,6 +13,7 @@ import pytest
 def test_result_reference_public_type_contract(
     tmp_path: Path, fixture: str, expected_status: int,
 ) -> None:
+    """Catch public annotation regressions, including suite tuple and score types."""
     source = Path(__file__).with_name(fixture)
     result = subprocess.run([
         sys.executable, '-m', 'mypy', '--strict', '--disallow-any-expr',
@@ -32,6 +33,7 @@ def test_result_reference_public_type_contract(
 
 
 def test_positive_result_reference_consumer_runs_without_native_code() -> None:
+    """The typed failure/metadata consumer also runs without loading a native library."""
     program = """
 import ctypes
 import runpy

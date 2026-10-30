@@ -42,16 +42,26 @@ def contents(root: Path) -> dict[str, bytes]:
     return {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
 
 
-def test_only_pyproject_controls_the_version(project: Path) -> None:
+@pytest.mark.parametrize('omitted', [(), ('Cargo.lock',), ('README.md',), ('Cargo.lock', 'README.md')])
+def test_only_pyproject_controls_the_version(project: Path, omitted: tuple[str, ...]) -> None:
+    """Synchronize every present generated copy, including minimal source trees.
+
+    Cargo.lock and README.md are optional; an absent optional file must neither
+    prevent synchronization nor be recreated. Existing files keep their modes
+    and timestamps on an unchanged check or repeated synchronization.
+    """
+    for filename in omitted:
+        (project / filename).unlink()
     assert read_version(project) == '1.2.3'
     before = contents(project)
     modes = {path.name: path.stat().st_mode for path in project.iterdir()}
     assert sync_version(project) == '1.2.3'
     after = contents(project)
     assert after['pyproject.toml'] == before['pyproject.toml']
-    assert after['Cargo.toml'] == before['Cargo.toml'].replace(b'0.0.0', b'1.2.3')
-    assert after['Cargo.lock'] == before['Cargo.lock'].replace(b'0.0.0', b'1.2.3')
-    assert after['README.md'] == before['README.md'].replace(b'0.0.0', b'1.2.3')
+    assert after.keys() == before.keys()
+    for filename in ('Cargo.toml', 'Cargo.lock', 'README.md'):
+        if filename in before:
+            assert after[filename] == before[filename].replace(b'0.0.0', b'1.2.3')
     assert {path.name: path.stat().st_mode for path in project.iterdir()} == modes
     times = {path.name: path.stat().st_mtime_ns for path in project.iterdir()}
     assert sync_version(project, check=True) == '1.2.3'
@@ -154,6 +164,12 @@ def test_failed_generated_write_leaves_the_source_and_copies_intact(
 
 
 def test_standalone_command_works_outside_the_checkout(project: Path, tmp_path: Path) -> None:
+    """Return actionable diagnostics and exit codes through the real version CLI.
+
+    A traceback may still contain the stale filename and exit with code 1;
+    checking both catches a broken error handler hidden by that coincidence.
+    Invalid version requests must also leave every source file intact.
+    """
     scripts = project / 'scripts'
     scripts.mkdir()
     script = scripts / 'version.py'
@@ -166,6 +182,8 @@ def test_standalone_command_works_outside_the_checkout(project: Path, tmp_path: 
     stale = invoke('--check')
     assert stale.returncode == 1
     assert 'Cargo.toml' in stale.stderr
+    assert 'Traceback' not in stale.stderr
+    assert not stale.stdout
     assert invoke('2.0.0').returncode == 0
     checked = invoke('--check')
     assert checked.returncode == 0
@@ -175,4 +193,10 @@ def test_standalone_command_works_outside_the_checkout(project: Path, tmp_path: 
     before = contents(project)
     invalid = invoke('3.0.0', '--check')
     assert invalid.returncode == 2
+    assert contents(project) == before
+    invalid_version = invoke('broken-version')
+    assert invalid_version.returncode == 1
+    assert 'X.Y.Z' in invalid_version.stderr
+    assert 'Traceback' not in invalid_version.stderr
+    assert not invalid_version.stdout
     assert contents(project) == before

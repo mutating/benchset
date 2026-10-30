@@ -161,24 +161,50 @@ fn real_runs_account_for_work_and_progress_on_caller() {
     }
 }
 
+/// Replay the complete single-worker workload, including an empty measurement.
+/// Waiting for the worker from the first callback exercises a naturally expired
+/// window before coordinator cancellation can bypass the checksum publication.
+/// The oracle accepts actual work when a platform's clock permits it, and uses
+/// zero for no work, protecting against a fabricated initial checksum.
 #[test]
 fn single_worker_checksum_matches_all_completed_kernel_steps() {
     let _serial = TEST_LOCK.lock().unwrap();
-    let result = run(
-        Benchmark::SingleCore,
-        options(),
-        &Cancellation::default(),
-        |_| {},
-    );
-    assert_eq!(result.status, Status::Completed, "{}", result.reason);
-    assert!(result.iterations > 0);
-    // With no warmup, every executed step is included in the iteration count.
-    let mut kernel = Kernel::new(0).unwrap();
-    let mut expected = 0;
-    for _ in 0..result.iterations {
-        expected = kernel.step();
+    for measurement in [options().measurement, Duration::from_nanos(1)] {
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let mut observed = false;
+        let result = run_with(
+            Benchmark::SingleCore,
+            Options {
+                measurement,
+                ..options()
+            },
+            &Cancellation::default(),
+            &mut |_| {
+                if !observed {
+                    observed = true;
+                    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            },
+            Arc::new(ObservedRuntime(finished_tx)),
+        );
+        assert_eq!(
+            result.status,
+            if result.iterations > 0 {
+                Status::Completed
+            } else {
+                Status::Failed
+            },
+            "{}",
+            result.reason
+        );
+        // With no warmup, every executed step is included in the iteration count.
+        let mut kernel = Kernel::new(0).unwrap();
+        let mut expected = 0;
+        for _ in 0..result.iterations {
+            expected = kernel.step();
+        }
+        assert_eq!(result.checksum, expected);
     }
-    assert_eq!(result.checksum, expected);
 }
 
 #[test]
@@ -421,36 +447,71 @@ impl Runtime for ObservedRuntime {
     }
 }
 
+/// A delayed callback must not inflate measured throughput time or progress.
+/// Crossing both phase and final deadlines covers clamping during measurement
+/// and cancellation after workers have already finished their real work.
 #[test]
 fn callback_delay_is_excluded_from_throughput_elapsed() {
     let _serial = TEST_LOCK.lock().unwrap();
-    let (finished_tx, finished_rx) = mpsc::channel();
-    let before = Instant::now();
-    let mut delayed = false;
-    let result = run_with(
-        Benchmark::SingleCore,
-        options(),
-        &Cancellation::default(),
-        &mut |p| {
-            if p.phase == Phase::Measurement && !delayed {
-                delayed = true;
-                // Wait for an observed worker exit before delaying the callback;
-                // this makes the assertion independent of hardware throughput.
-                finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                thread::sleep(Duration::from_millis(20));
+    for (warmup, cancel_after_deadline) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let before = Instant::now();
+        let mut delayed = false;
+        let cancellation = Cancellation::default();
+        let mut events = Vec::new();
+        let result = run_with(
+            Benchmark::SingleCore,
+            Options {
+                warmup: if warmup {
+                    Duration::from_millis(20)
+                } else {
+                    Duration::ZERO
+                },
+                ..options()
+            },
+            &cancellation,
+            &mut |p| {
+                events.push(p);
+                if matches!(p.phase, Phase::Warmup | Phase::Measurement) && !delayed {
+                    delayed = true;
+                    // Wait for an observed worker exit before delaying the callback;
+                    // this makes the assertion independent of hardware throughput.
+                    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    thread::sleep(Duration::from_millis(20));
+                    if cancel_after_deadline {
+                        cancellation.cancel();
+                    }
+                }
+            },
+            Arc::new(ObservedRuntime(finished_tx)),
+        );
+        assert_eq!(
+            result.status,
+            if cancel_after_deadline {
+                Status::Cancelled
+            } else {
+                Status::Completed
             }
-        },
-        Arc::new(ObservedRuntime(finished_tx)),
-    );
-    assert_eq!(result.status, Status::Completed);
-    assert!(before.elapsed().as_secs_f64() - result.elapsed_seconds >= 0.02);
-    assert_eq!(result.samples.len(), 1);
-    assert!(result.variation_percent.is_none());
-    assert!(!result.unstable);
-    assert_eq!(
-        result.pi_equivalent,
-        Some((result.iterations as f64 / result.elapsed_seconds) / 47231.227029007096)
-    );
+        );
+        assert!(events
+            .iter()
+            .all(|event| (0.0..=1.0).contains(&event.fraction)));
+        assert_eq!(events.last().unwrap().fraction, 1.0);
+        assert!(before.elapsed().as_secs_f64() - result.elapsed_seconds >= 0.02);
+        assert_eq!(result.samples.len(), 1);
+        assert!(result.variation_percent.is_none());
+        assert!(!result.unstable);
+        if cancel_after_deadline {
+            assert!(result.score.is_none() && result.pi_equivalent.is_none());
+        } else {
+            assert_eq!(
+                result.pi_equivalent,
+                Some((result.iterations as f64 / result.elapsed_seconds) / 47231.227029007096)
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -555,6 +616,8 @@ fn initialization_faults_join_partial_workers_and_recover() {
     }
 }
 
+/// Invalid requests must report no performed work or elapsed measurement time.
+/// This protects diagnostics from carrying fabricated defaults before workers start.
 #[test]
 fn invalid_and_overflow_durations_do_not_leave_active_workers() {
     let _serial = TEST_LOCK.lock().unwrap();
@@ -591,12 +654,23 @@ fn invalid_and_overflow_durations_do_not_leave_active_workers() {
         assert_reference_links(&result);
         assert!(result.reason.contains(reason));
         assert!(result.pi_equivalent.is_none());
+        assert_eq!((result.iterations, result.checksum), (0, 0));
+        assert_eq!(result.elapsed_seconds, 0.0);
+        assert!(result.samples.is_empty());
+        if opts.measurement.is_zero() {
+            assert_eq!(result.workers, 0);
+        }
         assert_recovered();
     }
 }
 
+/// Keep independent worker counters on separate minimum-size cache lines.
+/// Losing alignment/padding introduces false sharing and changes measured
+/// parallel throughput even when every numeric result remains self-consistent.
 #[test]
 fn sample_deltas_and_counter_selection() {
+    assert!(std::mem::align_of::<Counters>() >= 64);
+    assert_eq!(std::mem::size_of::<Counters>() % 64, 0);
     let counters: Vec<_> = [(13, 17), (23, 29)]
         .iter()
         .map(|&(warmup, measurement)| {
@@ -889,6 +963,10 @@ fn cancelled_warmup_excludes_work_and_reports_elapsed_fraction() {
     assert!(result.score.is_none() && result.pi_equivalent.is_none());
 }
 
+/// Compare the first periodic sample to the exact counter snapshot sent to progress.
+/// Delaying the first callback forces sampling and progress into the same next
+/// coordinator iteration; this avoids a timing approximation or a batch-size oracle.
+/// Tail repair must not conceal a missing initial iteration or corrupt its rate.
 #[test]
 fn observed_measurement_time_produces_periodic_samples_before_the_tail() {
     let _serial = TEST_LOCK.lock().unwrap();
@@ -913,10 +991,10 @@ fn observed_measurement_time_produces_periodic_samples_before_the_tail() {
                 previous_progress = Some(p.phase_elapsed_seconds);
             }
             if p.phase == Phase::Measurement && p.phase_elapsed_seconds >= 1.0 {
-                let first = *observed_snapshot.get_or_insert(p.phase_elapsed_seconds);
-                if p.phase_elapsed_seconds - first >= 0.2 {
-                    token.cancel();
-                }
+                observed_snapshot = Some(p);
+                token.cancel();
+            } else if p.phase == Phase::Measurement {
+                thread::sleep(Duration::from_secs_f64(1.05 - p.phase_elapsed_seconds));
             }
         },
     );
@@ -925,7 +1003,16 @@ fn observed_measurement_time_produces_periodic_samples_before_the_tail() {
         result.samples.len() >= 2,
         "an observed snapshot must precede the cancellation tail"
     );
-    assert!(result.samples[0].elapsed_seconds <= observed_snapshot.unwrap());
+    let observed = observed_snapshot.unwrap();
+    assert_eq!(
+        result.samples[0].elapsed_seconds,
+        observed.phase_elapsed_seconds
+    );
+    assert_eq!(
+        result.samples[0].duration_seconds,
+        observed.phase_elapsed_seconds
+    );
+    assert_eq!(result.samples[0].iterations, observed.iterations);
     assert!(result.samples[..result.samples.len() - 1]
         .iter()
         .all(|s| s.duration_seconds >= 1.0));

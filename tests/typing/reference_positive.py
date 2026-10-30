@@ -1,15 +1,17 @@
 """Reference metadata is available without Optional narrowing or native code."""
 
 from dataclasses import replace
-from typing import Tuple
+from typing import Optional, Tuple
 
 from benchset import (
     PI_REFERENCE_MACHINE,
     PI_REFERENCE_RUN,
+    AggregatedScores,
     BenchmarkResult,
     BenchmarkRunner,
     ReferenceMachine,
     ReferenceRun,
+    SuiteResult,
     run,
     run_all,
 )
@@ -26,11 +28,20 @@ def metadata(result: BenchmarkResult) -> Tuple[ReferenceMachine, ReferenceRun]:
 
 
 def main() -> None:
+    """Keep suite factories, tuples and optional scores usable by strict consumers."""
+    suite: SuiteResult = run_all(warmup_seconds=-1)
+    scores: AggregatedScores = suite.aggregated_scores
+    suite_results: Tuple[BenchmarkResult, ...] = suite.results
+    aggregate: Optional[float] = scores.pi_equivalent
+    rebuilt: SuiteResult = SuiteResult.from_results(suite_results)
+    assert rebuilt.results == suite_results
+    assert rebuilt.aggregated_scores.pi_equivalent == aggregate
+    assert aggregate is None
     results = (
         BenchmarkResult('single_core'),
         BenchmarkRunner().run('unknown'),
         run('multi_core', measurement_seconds=0),
-        *run_all(warmup_seconds=-1),
+        *suite_results,
     )
     for result in results:
         machine, reference = metadata(result)

@@ -160,6 +160,12 @@ jobs:
         run: swift build
       - name: Enforce 100% Swift source coverage
         run: python scripts/check_native_coverage.py swift
+      - name: Check concurrent suite ownership with Thread Sanitizer
+        run: >-
+          swift test --scratch-path target/swift-thread-sanitizer --sanitize thread
+          --disable-xctest --enable-swift-testing
+          -Xswiftc -target -Xswiftc "$(uname -m)-apple-macosx13.0"
+          --filter concurrentSuitesKeepSingleOwnerDuringCancellation
       - name: Run a public consumer of the unpacked offline Swift package
         run: |
           python -m pip install pytest==8.3.5

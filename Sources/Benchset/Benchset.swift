@@ -85,6 +85,31 @@ public struct BenchmarkResult {
 
 public enum BenchsetError: Error { case alreadyRunning, allocationFailed, resultUnavailable }
 
+public struct AggregatedScores {
+    /// Equal-weight geometric mean, computed as exp(mean(log(Pi equivalent))).
+    /// A zero individual value makes the aggregate zero.
+    /// Unavailable when any benchmark failed, was cancelled or was not run.
+    public let piEquivalent: Double?
+}
+
+public struct SuiteResult {
+    public let results: [BenchmarkResult]
+    public let aggregatedScores: AggregatedScores
+
+    public init(results: [BenchmarkResult]) {
+        self.results = results
+        let complete = results.map { $0.benchmark } == [.singleCore, .multiCore]
+            && results.allSatisfy {
+                $0.success && $0.piEquivalent.map { $0.isFinite && $0 >= 0 } == true
+            }
+        let equivalent: Double?
+        if !complete { equivalent = nil }
+        else if results.contains(where: { $0.piEquivalent == 0 }) { equivalent = 0 }
+        else { equivalent = exp(results.reduce(0) { $0 + log($1.piEquivalent!) } / Double(results.count)) }
+        self.aggregatedScores = AggregatedScores(piEquivalent: equivalent)
+    }
+}
+
 internal struct ReferenceAPI {
     var abiVersion: () -> UInt32
     var machine: (UnsafeMutablePointer<BenchsetReferenceMachine>, UInt32) -> Int32
@@ -177,6 +202,8 @@ public final class BenchmarkRunner {
     private let lock = NSLock()
     private let native: NativeAPI
     private var handle: OpaquePointer?
+    // nil outside runAll; otherwise keep cancellation across its native handles.
+    private var suiteCancelled: Bool?
 
     public init() { self.native = .live }
     internal init(native: NativeAPI) { self.native = native }
@@ -184,7 +211,36 @@ public final class BenchmarkRunner {
     public func cancel() {
         lock.lock()
         defer { lock.unlock() }
+        if suiteCancelled != nil { suiteCancelled = true }
         if let handle = handle { native.cancel(handle) }
+    }
+
+    /// Run singleCore then multiCore, stopping after failure or cancellation.
+    public func runAll(
+        warmupSeconds: Double = 120,
+        measurementSeconds: Double = 60,
+        onProgress: @escaping (Benchmark, Progress) -> Void = { _, _ in }
+    ) throws -> SuiteResult {
+        lock.lock()
+        guard handle == nil && suiteCancelled == nil else { lock.unlock(); throw BenchsetError.alreadyRunning }
+        suiteCancelled = false
+        lock.unlock()
+        defer {
+            lock.lock()
+            suiteCancelled = nil
+            lock.unlock()
+        }
+        var results: [BenchmarkResult] = []
+        for benchmark in [Benchmark.singleCore, .multiCore] {
+            let result = try runBenchmark(
+                benchmark, warmupSeconds: warmupSeconds, measurementSeconds: measurementSeconds,
+                inSuite: true,
+                onProgress: { onProgress(benchmark, $0) }
+            )
+            results.append(result)
+            if !result.success { break }
+        }
+        return SuiteResult(results: results)
     }
 
     public func run(
@@ -193,11 +249,20 @@ public final class BenchmarkRunner {
         measurementSeconds: Double = 60,
         onProgress: @escaping (Progress) -> Void = { _ in }
     ) throws -> BenchmarkResult {
+        try runBenchmark(benchmark, warmupSeconds: warmupSeconds, measurementSeconds: measurementSeconds,
+                         inSuite: false, onProgress: onProgress)
+    }
+
+    private func runBenchmark(
+        _ benchmark: Benchmark, warmupSeconds: Double, measurementSeconds: Double,
+        inSuite: Bool, onProgress: @escaping (Progress) -> Void
+    ) throws -> BenchmarkResult {
         lock.lock()
-        guard handle == nil else { lock.unlock(); throw BenchsetError.alreadyRunning }
+        guard handle == nil && (suiteCancelled == nil || inSuite) else { lock.unlock(); throw BenchsetError.alreadyRunning }
         guard native.abiVersion() == BENCHSET_ABI_VERSION else { lock.unlock(); throw BenchsetError.resultUnavailable }
         guard let current = native.create() else { lock.unlock(); throw BenchsetError.allocationFailed }
         handle = current
+        if suiteCancelled == true { native.cancel(current) }
         lock.unlock()
         defer {
             lock.lock()

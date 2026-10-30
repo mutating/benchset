@@ -1,4 +1,4 @@
-/* Reject short/incompatible configs without reading across the fixed prefix. */
+/** Reject short/incompatible configs in both APIs without reading a protected tail. */
 #define _GNU_SOURCE
 #include "benchset.h"
 #include <assert.h>
@@ -12,6 +12,7 @@
 #include <unistd.h>
 #endif
 
+/** Both entrypoints must reject a readable prefix without touching the inaccessible tail. */
 int main(void) {
     size_t page_size;
     unsigned char *pages;
@@ -53,6 +54,16 @@ int main(void) {
         assert(result.status == BENCHSET_FAILED && result.iterations == 0 && result.sample_count == 0);
         assert(strstr(benchset_reason(handle), "incompatible C ABI/config size") != NULL);
         benchset_free(handle);
+        BenchsetSuiteHandle *suite_handle = benchset_suite_create();
+        assert(suite_handle != NULL);
+        assert(benchset_run_all(suite_handle, (const BenchsetConfig *)prefix, NULL, NULL) == BENCHSET_FAILED);
+        BenchsetSuiteResult suite;
+        assert(benchset_suite_result(suite_handle, &suite, sizeof(suite)) == 1);
+        assert(suite.result_count == 1 && !suite.aggregated_scores.has_pi_equivalent);
+        assert(suite.results[0].base.base.status == BENCHSET_FAILED);
+        assert(suite.results[0].base.base.iterations == 0);
+        assert(strstr(benchset_suite_reason(suite_handle, 0), "incompatible C ABI/config size") != NULL);
+        benchset_suite_free(suite_handle);
     }
 #ifdef _WIN32
     assert(VirtualFree(pages, 0, MEM_RELEASE));

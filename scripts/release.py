@@ -24,6 +24,7 @@ from typing import Any
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts.cargo import target_directory
 from scripts.version import read_version, sync_version
 
 NATIVE_TARGETS = (
@@ -166,7 +167,9 @@ def validate_native_files(directory: Path, package_version: str) -> None:
                 if platform.endswith('_' + architecture):
                     platforms.add('macos-' + architecture)
         elif platform.startswith('manylinux'):
-            platforms.add('linux-' + ('aarch64' if platform.endswith('aarch64') else 'x86_64'))
+            for architecture in ('aarch64', 'x86_64'):
+                if platform.endswith('_' + architecture):
+                    platforms.add('linux-' + architecture)
         elif platform == 'win_amd64':
             platforms.add('windows-x86_64')
     if platforms != {'macos-arm64', 'macos-x86_64', 'linux-aarch64', 'linux-x86_64', 'windows-x86_64'}:
@@ -366,7 +369,7 @@ def main() -> None:
     else:
         metadata = read_metadata(arguments.directory)
         filename = 'benchset-' + metadata['version'] + '.crate'
-        if digest(root / 'target/package' / filename) != metadata['files'][filename]:
+        if digest(target_directory(root) / 'package' / filename) != metadata['files'][filename]:
             raise ValueError('Cargo repackaged a different crate; refusing to publish')
 
 

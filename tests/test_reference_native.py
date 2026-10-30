@@ -133,8 +133,10 @@ def test_consumer_no_work_exception_is_opt_in_and_exact(
     ('legacy_v1.c', 'legacy ABI 1 consumer remains compatible'),
     ('legacy_v2.c', 'legacy V2 result consumer remains compatible'),
     ('config_prefix.c', 'C config prefix stops at a protected page'),
+    ('suite.c', 'C full suite smoke passed'),
 ])
 def test_public_native_consumers(tmp_path: Path, source: str, message: str) -> None:
+    """Exercise the public ABI, including suite access and protected config prefixes."""
     filenames: Tuple[str, str, str] = ('benchset.dll', 'libbenchset.dylib', 'libbenchset.so')
     filename = filenames[0] if sys.platform == 'win32' else filenames[1 if sys.platform == 'darwin' else 2]
     library = ROOT / 'benchset' / '_native' / filename

@@ -1,5 +1,7 @@
 /* C++ linkage and consumer types are checked without private Rust declarations. */
 #include "benchset.h"
+/** Real clients can encounter the public header through several independent includes. */
+#include "benchset.h"
 #include <array>
 #include <cassert>
 #include <condition_variable>
@@ -13,21 +15,122 @@
 #include <utility>
 #include <vector>
 
+/** Freeze the supported 64-bit wire layout independently of the Rust implementation.
+ * Same-type field swaps preserve sizeof but make existing binaries read unrelated
+ * values. Type, signedness, constness, alignment and offsets are all ABI contracts.
+ */
+#define CHECK_RECORD(T, size) static_assert(sizeof(T) == size && alignof(T) == 8, #T " layout")
+#define CHECK_FIELD(T, field, type, offset) \
+    static_assert(std::is_same<decltype(T::field), type>::value, #T "." #field " type"); \
+    static_assert(offsetof(T, field) == offset, #T "." #field " offset")
 static_assert(BENCHSET_ABI_VERSION == 1u, "ABI version");
-static_assert(std::is_same<decltype(BenchsetReferenceMachine::memory_bytes), uint64_t>::value, "RAM is uint64_t");
-static_assert(std::is_same<decltype(BenchsetResultV2::pi_equivalent), double>::value, "ratio is double");
-static_assert(sizeof(BenchsetResult) == 88, "old result");
-static_assert(sizeof(BenchsetResultV2) == 104, "new result");
-static_assert(offsetof(BenchsetResultV2, pi_equivalent) == 88, "ratio position");
-static_assert(std::is_same<decltype(BenchsetResultV3::base), BenchsetResultV2>::value, "V2 prefix");
-static_assert(std::is_same<decltype(BenchsetResultV3::reference_machine), const BenchsetReferenceMachine *>::value,
-              "machine pointer is const");
-static_assert(std::is_same<decltype(BenchsetResultV3::reference_run), const BenchsetReferenceRun *>::value,
-              "run pointer is const");
-static_assert(sizeof(BenchsetResultV3) == 120 && alignof(BenchsetResultV3) == 8, "V3 result");
-static_assert(offsetof(BenchsetResultV3, base) == 0, "V2 prefix position");
-static_assert(offsetof(BenchsetResultV3, reference_machine) == 104, "machine position");
-static_assert(offsetof(BenchsetResultV3, reference_run) == 112, "run position");
+static_assert(BENCHSET_SINGLE_CORE == 1u && BENCHSET_MULTI_CORE == 2u, "benchmark wire values");
+static_assert(BENCHSET_COMPLETED == 0u && BENCHSET_CANCELLED == 1u && BENCHSET_FAILED == 2u, "status wire values");
+static_assert(BENCHSET_WARMUP == 1u && BENCHSET_MEASUREMENT == 2u && BENCHSET_PHASE_COMPLETED == 3u
+              && BENCHSET_PHASE_CANCELLED == 4u && BENCHSET_PHASE_FAILED == 5u, "phase wire values");
+CHECK_RECORD(BenchsetConfig, 32);
+CHECK_FIELD(BenchsetConfig, abi_version, uint32_t, 0);
+CHECK_FIELD(BenchsetConfig, struct_size, uint32_t, 4);
+CHECK_FIELD(BenchsetConfig, benchmark, uint32_t, 8);
+CHECK_FIELD(BenchsetConfig, reserved, uint32_t, 12);
+CHECK_FIELD(BenchsetConfig, warmup_seconds, double, 16);
+CHECK_FIELD(BenchsetConfig, measurement_seconds, double, 24);
+CHECK_RECORD(BenchsetProgress, 40);
+CHECK_FIELD(BenchsetProgress, phase, uint32_t, 0);
+CHECK_FIELD(BenchsetProgress, workers, uint32_t, 4);
+CHECK_FIELD(BenchsetProgress, fraction, double, 8);
+CHECK_FIELD(BenchsetProgress, phase_elapsed_seconds, double, 16);
+CHECK_FIELD(BenchsetProgress, phase_duration_seconds, double, 24);
+CHECK_FIELD(BenchsetProgress, iterations, uint64_t, 32);
+CHECK_RECORD(BenchsetResult, 88);
+CHECK_FIELD(BenchsetResult, abi_version, uint32_t, 0);
+CHECK_FIELD(BenchsetResult, status, uint32_t, 4);
+CHECK_FIELD(BenchsetResult, benchmark, uint32_t, 8);
+CHECK_FIELD(BenchsetResult, workers, uint32_t, 12);
+CHECK_FIELD(BenchsetResult, score, double, 16);
+CHECK_FIELD(BenchsetResult, warmup_seconds, double, 24);
+CHECK_FIELD(BenchsetResult, measurement_seconds, double, 32);
+CHECK_FIELD(BenchsetResult, elapsed_seconds, double, 40);
+CHECK_FIELD(BenchsetResult, variation_percent, double, 48);
+CHECK_FIELD(BenchsetResult, iterations, uint64_t, 56);
+CHECK_FIELD(BenchsetResult, checksum, uint64_t, 64);
+CHECK_FIELD(BenchsetResult, sample_count, uint64_t, 72);
+CHECK_FIELD(BenchsetResult, unstable, uint32_t, 80);
+CHECK_FIELD(BenchsetResult, has_variation, uint32_t, 84);
+CHECK_RECORD(BenchsetResultV2, 104);
+CHECK_FIELD(BenchsetResultV2, base, BenchsetResult, 0);
+CHECK_FIELD(BenchsetResultV2, pi_equivalent, double, 88);
+CHECK_FIELD(BenchsetResultV2, has_pi_equivalent, uint32_t, 96);
+CHECK_RECORD(BenchsetReferenceMachine, 56);
+CHECK_FIELD(BenchsetReferenceMachine, name, const char *, 0);
+CHECK_FIELD(BenchsetReferenceMachine, short_name, const char *, 8);
+CHECK_FIELD(BenchsetReferenceMachine, os_name, const char *, 16);
+CHECK_FIELD(BenchsetReferenceMachine, os_version, const char *, 24);
+CHECK_FIELD(BenchsetReferenceMachine, cpu_architecture, const char *, 32);
+CHECK_FIELD(BenchsetReferenceMachine, memory_bytes, uint64_t, 40);
+CHECK_FIELD(BenchsetReferenceMachine, cpu_cores, uint32_t, 48);
+CHECK_RECORD(BenchsetReferenceRun, 40);
+CHECK_FIELD(BenchsetReferenceRun, started_at_unix_seconds, double, 0);
+CHECK_FIELD(BenchsetReferenceRun, start_temperature_c, double, 8);
+CHECK_FIELD(BenchsetReferenceRun, end_temperature_c, double, 16);
+CHECK_FIELD(BenchsetReferenceRun, warmup_seconds, double, 24);
+CHECK_FIELD(BenchsetReferenceRun, result_count, uint64_t, 32);
+CHECK_RECORD(BenchsetReferenceBenchmarkResult, 16);
+CHECK_FIELD(BenchsetReferenceBenchmarkResult, benchmark, const char *, 0);
+CHECK_FIELD(BenchsetReferenceBenchmarkResult, score, double, 8);
+CHECK_RECORD(BenchsetResultV3, 120);
+CHECK_FIELD(BenchsetResultV3, base, BenchsetResultV2, 0);
+CHECK_FIELD(BenchsetResultV3, reference_machine, const BenchsetReferenceMachine *, 104);
+CHECK_FIELD(BenchsetResultV3, reference_run, const BenchsetReferenceRun *, 112);
+CHECK_RECORD(BenchsetSample, 32);
+CHECK_FIELD(BenchsetSample, elapsed_seconds, double, 0);
+CHECK_FIELD(BenchsetSample, duration_seconds, double, 8);
+CHECK_FIELD(BenchsetSample, iterations, uint64_t, 16);
+CHECK_FIELD(BenchsetSample, iterations_per_second, double, 24);
+CHECK_RECORD(BenchsetAggregatedScores, 16);
+CHECK_FIELD(BenchsetAggregatedScores, pi_equivalent, double, 0);
+CHECK_FIELD(BenchsetAggregatedScores, has_pi_equivalent, uint32_t, 8);
+CHECK_RECORD(BenchsetSuiteResult, 32);
+CHECK_FIELD(BenchsetSuiteResult, results, const BenchsetResultV3 *, 0);
+CHECK_FIELD(BenchsetSuiteResult, result_count, uint64_t, 8);
+CHECK_FIELD(BenchsetSuiteResult, aggregated_scores, BenchsetAggregatedScores, 16);
+CHECK_RECORD(BenchsetSuiteProgress, 48);
+CHECK_FIELD(BenchsetSuiteProgress, benchmark, uint32_t, 0);
+CHECK_FIELD(BenchsetSuiteProgress, progress, BenchsetProgress, 8);
+#undef CHECK_FIELD
+#undef CHECK_RECORD
+
+/** Public function and callback signatures must remain compatible with existing callers. */
+using ExpectedProgressCallback = void (*)(const BenchsetProgress *, void *);
+using ExpectedSuiteCallback = void (*)(const BenchsetSuiteProgress *, void *);
+static_assert(std::is_same<BenchsetProgressCallback, ExpectedProgressCallback>::value, "progress callback ABI");
+static_assert(std::is_same<BenchsetSuiteProgressCallback, ExpectedSuiteCallback>::value, "suite callback ABI");
+#define CHECK_FUNCTION(name, result, ...) \
+    static_assert(std::is_same<decltype(&name), result (*)(__VA_ARGS__)>::value, #name " signature")
+CHECK_FUNCTION(benchset_abi_version, uint32_t, void);
+CHECK_FUNCTION(benchset_version, const char *, void);
+CHECK_FUNCTION(benchset_default_config, int32_t, BenchsetConfig *);
+CHECK_FUNCTION(benchset_create, BenchsetHandle *, void);
+CHECK_FUNCTION(benchset_run, uint32_t, BenchsetHandle *, const BenchsetConfig *, ExpectedProgressCallback, void *);
+CHECK_FUNCTION(benchset_cancel, void, BenchsetHandle *);
+CHECK_FUNCTION(benchset_result, int32_t, const BenchsetHandle *, BenchsetResult *);
+CHECK_FUNCTION(benchset_result_v2, int32_t, const BenchsetHandle *, BenchsetResultV2 *, uint32_t);
+CHECK_FUNCTION(benchset_result_v3, int32_t, const BenchsetHandle *, BenchsetResultV3 *, uint32_t);
+CHECK_FUNCTION(benchset_reference_machine, int32_t, BenchsetReferenceMachine *, uint32_t);
+CHECK_FUNCTION(benchset_reference_run, int32_t, BenchsetReferenceRun *, uint32_t);
+CHECK_FUNCTION(benchset_reference_result, int32_t, uint64_t , BenchsetReferenceBenchmarkResult *, uint32_t);
+CHECK_FUNCTION(benchset_sample, int32_t, const BenchsetHandle *, uint64_t , BenchsetSample *);
+CHECK_FUNCTION(benchset_reason, const char *, const BenchsetHandle *);
+CHECK_FUNCTION(benchset_free, void, BenchsetHandle *);
+CHECK_FUNCTION(benchset_suite_create, BenchsetSuiteHandle *, void);
+CHECK_FUNCTION(benchset_run_all, uint32_t, BenchsetSuiteHandle *, const BenchsetConfig *, ExpectedSuiteCallback, void *);
+CHECK_FUNCTION(benchset_suite_cancel, void, BenchsetSuiteHandle *);
+CHECK_FUNCTION(benchset_suite_result, int32_t, const BenchsetSuiteHandle *, BenchsetSuiteResult *, uint32_t);
+CHECK_FUNCTION(benchset_suite_result_at, int32_t, const BenchsetSuiteHandle *, uint64_t , BenchsetResultV3 *, uint32_t);
+CHECK_FUNCTION(benchset_suite_sample, int32_t, const BenchsetSuiteHandle *, uint64_t , uint64_t , BenchsetSample *);
+CHECK_FUNCTION(benchset_suite_reason, const char *, const BenchsetSuiteHandle *, uint64_t);
+CHECK_FUNCTION(benchset_suite_free, void, BenchsetSuiteHandle *);
+#undef CHECK_FUNCTION
 
 static void assert_views(const BenchsetReferenceMachine *machine, const BenchsetReferenceRun *run) {
     assert(machine != nullptr && run != nullptr);

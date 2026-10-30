@@ -62,6 +62,11 @@ def test_model_and_result_versions_come_from_package_metadata(monkeypatch: pytes
 def test_python_validation_does_not_allocate_native(
     monkeypatch: pytest.MonkeyPatch, warmup: float, measurement: float,
 ) -> None:
+    """Reject bad durations before loading Rust and identify the offending option.
+
+    A generic failure reason hides whether the caller must fix warmup or
+    measurement and whether zero is allowed for that particular duration.
+    """
     def forbidden() -> Native:
         pytest.fail('invalid options must not load native code')
     monkeypatch.setattr(api, 'Native', forbidden)
@@ -71,6 +76,10 @@ def test_python_validation_does_not_allocate_native(
     assert result.score is None
     assert result.pi_equivalent is None
     assert result.reason
+    invalid_warmup = not math.isfinite(warmup) or warmup < 0
+    assert ('warmup_seconds' if invalid_warmup else 'measurement_seconds') in result.reason
+    assert 'finite' in result.reason
+    assert ('nonnegative' if invalid_warmup else 'positive') in result.reason
     if math.isnan(warmup):
         assert math.isnan(result.warmup_seconds)
     else:
@@ -95,9 +104,17 @@ def test_native_duration_limits_preserve_requested_diagnostics(warmup: float, me
 
 @pytest.mark.parametrize('phase', ['warmup', 'measurement', 'completed'])
 @pytest.mark.parametrize('error_type', [ValueError, KeyboardInterrupt, SystemExit, GeneratorExit])
+@pytest.mark.parametrize('formatting_error', [None, ValueError, TypeError, RuntimeError, KeyboardInterrupt, SystemExit, GeneratorExit])
 def test_callback_base_exceptions_stop_notifications_and_allow_reuse(
     monkeypatch: pytest.MonkeyPatch, phase: str, error_type: Type[BaseException],
+    formatting_error: Optional[Type[BaseException]],
 ) -> None:
+    """Return a failed snapshot for callback errors, even if their message raises.
+
+    Keep the original error's type as a fallback, suppress later notifications,
+    preserve completed native data, free the handle and permit runner reuse.
+    Secondary BaseExceptions must not escape from diagnostic formatting.
+    """
     native = Native()
     library = CallbackLibrary()
     monkeypatch.setattr(native, 'lib', library)
@@ -105,18 +122,30 @@ def test_callback_base_exceptions_stop_notifications_and_allow_reuse(
     runner = BenchmarkRunner()
     events: List[Progress] = []
     caller = get_ident()
+    error = error_type('callback boundary')
+    if formatting_error is not None:
+        class Unprintable(error_type):
+            def __str__(self) -> str:
+                raise formatting_error('formatter failed')
+        error = Unprintable()
 
     def callback(progress: Progress) -> None:
         assert get_ident() == caller
         events.append(progress)
         if progress.phase == phase:
-            raise error_type('callback boundary')
+            raise error
 
-    result = runner.run('single_core', warmup_seconds=0.02, measurement_seconds=0.04, on_progress=callback)
+    try:
+        result = runner.run('single_core', warmup_seconds=0.02, measurement_seconds=0.04, on_progress=callback)
+    except BaseException as escaped:  # noqa: BLE001 — Report even an escaped interrupt as a test failure.
+        pytest.fail(f'callback diagnostic escaped as {type(escaped).__name__}')
     assert_result_references(result)
     assert result.status == 'failed'
     assert result.score is None
-    assert result.reason == f'progress callback failed: {error_type.__name__}: callback boundary'
+    expected_reason = f'progress callback failed: {type(error).__name__}'
+    if formatting_error is None:
+        expected_reason += ': callback boundary'
+    assert result.reason == expected_reason
     assert result.pi_equivalent is None
     assert events[-1].phase == phase
     assert sum(event.phase == phase for event in events) == 1
@@ -202,24 +231,37 @@ class ManagedNative(Native):
 def test_public_api_forwards_durations_and_callback_without_running_long_benchmarks(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, durations: Optional[Tuple[float, float]],
 ) -> None:
+    """Accept benchmark keywords, forward windows and preserve caller-thread callbacks.
+
+    Recorded thread IDs expose accidental suite offloading without relying on
+    how callback exceptions are converted into benchmark failures.
+    """
     backend = ManagedNative()
     monkeypatch.setattr(api, 'Native', lambda: backend)
     options = {} if durations is None else {'warmup_seconds': durations[0], 'measurement_seconds': durations[1]}
     expected_durations = (120.0, 60.0) if durations is None else durations
     events: List[Progress] = []
+    caller = get_ident()
+    callback_threads: List[int] = []
+
+    def record(progress: Progress) -> None:
+        events.append(progress)
+        callback_threads.append(get_ident())
+
     results: Tuple[BenchmarkResult, ...]
     if entrypoint == 'runner':
-        results = (BenchmarkRunner().run('single_core', on_progress=events.append, **options),)
+        results = (BenchmarkRunner().run(benchmark='single_core', on_progress=record, **options),)
     elif entrypoint == 'run':
-        results = (run('single_core', on_progress=events.append, **options),)
+        results = (run(benchmark='single_core', on_progress=record, **options),)
     else:
-        results = run_all(on_progress=events.append, **options)
+        results = run_all(on_progress=record, **options).results
     for result in results:
         assert_result_references(result)
     benchmarks = ['single_core', 'multi_core'] if entrypoint == 'run_all' else ['single_core']
     assert [(result.benchmark, result.warmup_seconds, result.measurement_seconds)
             for result in results] == [(benchmark, *expected_durations) for benchmark in benchmarks]
     assert [event.benchmark for event in events] == benchmarks
+    assert callback_threads == [caller] * len(benchmarks)
     assert all(result.success for result in results)
     assert backend.calls == ['create', 'execute', 'free'] * len(benchmarks)
 
@@ -340,11 +382,15 @@ class ResultLibrary:
 
     def benchset_result_v2(self, _handle: int, output: Any, output_size: int) -> int:
         assert output_size == ctypes.sizeof(CResultV2)
+        # C padding after the uint32 presence flag is not guaranteed to be zero.
+        # Poison it so widening that flag cannot fabricate a present value.
+        padding = CResultV2.has_pi_equivalent.offset + ctypes.sizeof(ctypes.c_uint32)
+        ctypes.memset(ctypes.addressof(self.value) + padding, 0xA5, ctypes.sizeof(self.value) - padding)
         ctypes.memmove(output, ctypes.byref(self.value), ctypes.sizeof(self.value))
         return 1
 
     def benchset_sample(self, _handle: int, index: int, output: Any) -> int:
-        sample = CSample(4.5 + index, 1.5 + index, 2**64 - 1 - index, 42.123456789012345 + index)
+        sample = CSample(4.5123456789012345 + index, 1.5 + index, 2**64 - 1 - index, 42.123456789012345 + index)
         ctypes.memmove(output, ctypes.byref(sample), ctypes.sizeof(sample))
         return 1
 
@@ -387,6 +433,11 @@ def test_ctypes_preserves_every_result_sample_and_progress_field(  # noqa: PLR09
     monkeypatch: pytest.MonkeyPatch, benchmark: str, unstable: bool, status: int,
     reason: Optional[bytes], has_variation: int,
 ) -> None:
+    """Preserve native fields, including unsigned counters and double sample times.
+
+    Sample timestamps needing double precision expose a float32 wire regression
+    that whole seconds and halves conceal even when the remaining layout is intact.
+    """
     native = Native()
     library = ResultLibrary(status, reason, has_variation)
     library.value.unstable = int(unstable)
@@ -405,8 +456,8 @@ def test_ctypes_preserves_every_result_sample_and_progress_field(  # noqa: PLR09
     assert (result.iterations, result.checksum) == (2**64 - 1, 2**64 - 2)
     assert result.variation_percent == (0 if has_variation else None)
     assert result.unstable is unstable
-    assert result.samples == (Sample(4.5, 1.5, 2**64 - 1, 42.123456789012345),
-                              Sample(5.5, 2.5, 2**64 - 2, 43.123456789012345))
+    assert result.samples == (Sample(4.5123456789012345, 1.5, 2**64 - 1, 42.123456789012345),
+                              Sample(5.5123456789012345, 2.5, 2**64 - 2, 43.123456789012345))
     assert [event.phase for event in events] == ['warmup', 'measurement', 'completed', 'cancelled', 'failed']
     assert all((p.benchmark, p.workers, p.fraction, p.phase_elapsed_seconds,
                 p.phase_duration_seconds, p.iterations) == (benchmark, 2**32 - 1, 0.12345678901234567,
@@ -442,6 +493,12 @@ def test_unavailable_variation_does_not_imply_instability(monkeypatch: pytest.Mo
     assert_result_references(result)
     assert result.success
     assert result.variation_percent is None
+    unrun = BenchmarkResult('single_core')
+    assert unrun.status == 'failed'
+    assert unrun.reason is None
+    assert unrun.score is None
+    assert unrun.unit == 'iterations/s'
+    assert unrun.pi_equivalent is None
     assert not result.unstable
 
 
@@ -461,9 +518,18 @@ def test_native_platform_library_selection(monkeypatch: pytest.MonkeyPatch, plat
     assert library.benchset_run.argtypes == [ctypes.c_void_p, ctypes.POINTER(Config), Callback, ctypes.c_void_p]
 
 
-def test_native_package_version_mismatch_is_independent_of_abi(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('native_version', [b'1.9.9', b'2.0.1', b'other-version'])
+def test_native_package_version_mismatch_is_independent_of_abi(
+    monkeypatch: pytest.MonkeyPatch, native_version: bytes,
+) -> None:
+    """Reject both stale and newer binaries even when their C ABI still matches.
+
+    A fixed wrapper version makes the two mismatch directions independent of
+    the project's next release and catches one-sided compatibility checks.
+    """
     library = Native().lib
-    monkeypatch.setattr(library, 'benchset_version', lambda: b'other-version')
+    monkeypatch.setattr('benchset._native.__version__', '2.0.0')
+    monkeypatch.setattr(library, 'benchset_version', lambda: native_version)
     monkeypatch.setattr(ctypes, 'CDLL', lambda _path: library)
     with pytest.raises(RuntimeError, match='version/ABI'):
         Native()
@@ -471,6 +537,11 @@ def test_native_package_version_mismatch_is_independent_of_abi(monkeypatch: pyte
 
 @pytest.mark.parametrize('status', ['completed', 'cancelled', 'failed'])
 def test_models_are_immutable_with_independent_result_defaults(status: str) -> None:
+    """Keep untouched diagnostics empty until work supplies actual measurements.
+
+    Immutable default records must not invent CPU work, elapsed time, checksums,
+    or instability; each result owns an independent empty sample tuple.
+    """
     result = BenchmarkResult('single_core', status=status)
     assert_result_references(result)
     assert result.success == (status == 'completed')
@@ -478,6 +549,9 @@ def test_models_are_immutable_with_independent_result_defaults(status: str) -> N
         with pytest.raises(FrozenInstanceError):
             setattr(value, field, 0)
     assert result.samples == BenchmarkResult('multi_core').samples == ()
+    assert (result.workers, result.elapsed_seconds, result.iterations, result.checksum) == (0, 0.0, 0, 0)
+    assert result.unstable is False
+    assert result.variation_percent is None
 
 
 @pytest.mark.parametrize(('stop_index', 'status'), [(0, 'cancelled'), (0, 'failed'), (1, 'cancelled'), (1, 'failed'), (1, 'completed')])
@@ -491,7 +565,7 @@ def test_suite_order_forwarding_and_early_stop(monkeypatch: pytest.MonkeyPatch, 
         names.append(name)
         return BenchmarkResult(name, status=status if len(names) - 1 == stop_index else 'completed')
     monkeypatch.setattr(api, 'run', execute)
-    results = run_all(warmup_seconds=0.75, measurement_seconds=1.25, on_progress=callback)
+    results = run_all(warmup_seconds=0.75, measurement_seconds=1.25, on_progress=callback).results
     for result in results:
         assert_result_references(result)
     assert names == ['single_core', 'multi_core'][:stop_index + 1]

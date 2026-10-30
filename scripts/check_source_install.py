@@ -76,6 +76,16 @@ for result in results:
     payload = json.loads(json.dumps(asdict(result), allow_nan=False))
     assert payload['reference_machine'] == machine
     assert payload['reference_run'] == json.loads(json.dumps(asdict(reference)))
+suite = run_all(warmup_seconds=0, measurement_seconds=0.05)
+assert isinstance(suite, benchset.SuiteResult)
+assert isinstance(suite.results, tuple)
+assert tuple(value.benchmark for value in suite.results) == tuple(expected)[:len(suite.results)]
+if all(value.success for value in suite.results):
+    ratios = [value.pi_equivalent for value in suite.results]
+    expected_score = 0.0 if 0.0 in ratios else math.exp(sum(math.log(value) for value in ratios) / len(expected))
+    assert math.isclose(suite.aggregated_scores.pi_equivalent, expected_score, rel_tol=1e-12, abs_tol=0)
+else:
+    assert suite.aggregated_scores.pi_equivalent is None
 print('Installed API: result references, JSON, typing and pi equivalents verified')
 '''
 
@@ -83,6 +93,15 @@ print('Installed API: result references, JSON, typing and pi equivalents verifie
 def verify_cli(output, errors='', returncode=0, measurement_seconds=0.05):
     """Check completed results or the exact no-work failure of a short window."""
     output, errors = output.replace('\r\n', '\n'), errors.replace('\r\n', '\n')
+    if '\r' in output + errors or '\x1b' in output + errors:
+        raise RuntimeError('the installed CLI produced invalid streams, exit status or suite order')
+    # The full-suite summary follows the individual benchmark sections.
+    for text in (output, errors):
+        summaries = [line for line in text.splitlines() if line.startswith('Full Pi equivalent')]
+        if len(summaries) > 1:
+            raise RuntimeError('the installed CLI produced duplicate suite summaries')
+    output = '\n'.join(line for line in output.splitlines() if not line.startswith('Full Pi equivalent')).rstrip()
+    errors = '\n'.join(line for line in errors.splitlines() if not line.startswith('Full Pi equivalent')).rstrip()
     names = ('single_core', 'multi_core')
     completed = output.rstrip().split('\n\n') if output else []
     failed = errors.rstrip().split('\n\n') if errors else []

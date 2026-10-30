@@ -47,7 +47,7 @@ def test_cancel_during_loading(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_suite_stops_after_failure() -> None:
-    results = run_all(warmup_seconds=-1)
+    results = run_all(warmup_seconds=-1).results
     assert len(results) == 1
     assert not results[0].success
     assert_result_references(results[0])

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_WARMUP_SECONDS: f64 = 120.0;
 pub const DEFAULT_MEASUREMENT_SECONDS: f64 = 60.0;
+pub const BENCHMARKS: [Benchmark; 2] = [Benchmark::SingleCore, Benchmark::MultiCore];
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +145,78 @@ impl BenchmarkResult {
             reference_run: &PI_REFERENCE_RUN,
         }
     }
+}
+
+/// Scores for the complete suite. Unfinished suites have no aggregate score.
+#[derive(Clone, Debug, Default)]
+pub struct AggregatedScores {
+    /// Equal-weight geometric mean of the individual Pi equivalents, computed
+    /// as exp(mean(ln(value))). A zero value makes the aggregate zero.
+    pub pi_equivalent: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SuiteResult {
+    pub results: Vec<BenchmarkResult>,
+    pub aggregated_scores: AggregatedScores,
+}
+
+impl SuiteResult {
+    pub fn new(results: Vec<BenchmarkResult>) -> Self {
+        let complete = results.len() == BENCHMARKS.len()
+            && results.iter().zip(BENCHMARKS).all(|(result, benchmark)| {
+                result.benchmark == benchmark
+                    && result.status == Status::Completed
+                    && result
+                        .pi_equivalent
+                        .is_some_and(|value| value.is_finite() && value >= 0.0)
+            });
+        let pi_equivalent = complete.then(|| {
+            if results
+                .iter()
+                .any(|result| result.pi_equivalent == Some(0.0))
+            {
+                return 0.0;
+            }
+            (results
+                .iter()
+                .map(|result| result.pi_equivalent.unwrap().ln())
+                .sum::<f64>()
+                / results.len() as f64)
+                .exp()
+        });
+        Self {
+            results,
+            aggregated_scores: AggregatedScores { pi_equivalent },
+        }
+    }
+}
+
+/// Run every benchmark in order, stopping after failure or cancellation.
+/// Progress includes the benchmark being measured and runs on the calling thread.
+pub fn run_all(
+    options: Options,
+    cancellation: &Cancellation,
+    mut on_progress: impl FnMut(Benchmark, Progress),
+) -> SuiteResult {
+    run_suite(|benchmark| {
+        run(benchmark, options, cancellation, |progress| {
+            on_progress(benchmark, progress)
+        })
+    })
+}
+
+fn run_suite(mut runner: impl FnMut(Benchmark) -> BenchmarkResult) -> SuiteResult {
+    let mut results = Vec::new();
+    for benchmark in BENCHMARKS {
+        let result = runner(benchmark);
+        let completed = result.status == Status::Completed;
+        results.push(result);
+        if !completed {
+            break;
+        }
+    }
+    SuiteResult::new(results)
 }
 
 struct ActiveGuard;
@@ -338,11 +411,12 @@ fn run_with(
                     for _ in 0..8 {
                         checksum = kernel.step();
                     }
-                    if warmup {
-                        counter.warmup.fetch_add(8, Ordering::Relaxed);
+                    let phase_counter = if warmup {
+                        &counter.warmup
                     } else {
-                        counter.measurement.fetch_add(8, Ordering::Relaxed);
-                    }
+                        &counter.measurement
+                    };
+                    phase_counter.fetch_add(8, Ordering::Relaxed);
                 }
                 let end = Instant::now();
                 let elapsed = end.saturating_duration_since(times.warm_end).as_nanos();
@@ -583,3 +657,6 @@ mod tests;
 
 #[cfg(test)]
 mod reference_tests;
+
+#[cfg(test)]
+mod suite_tests;

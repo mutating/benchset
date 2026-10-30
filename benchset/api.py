@@ -5,7 +5,7 @@ import signal
 from dataclasses import replace
 from threading import RLock, current_thread, main_thread
 from types import FrameType
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 from benchset._native import Native
 from benchset.models import (
@@ -14,6 +14,7 @@ from benchset.models import (
     DEFAULT_WARMUP_SECONDS,
     BenchmarkResult,
     Progress,
+    SuiteResult,
 )
 
 
@@ -148,7 +149,7 @@ def run_all(
     warmup_seconds: float = DEFAULT_WARMUP_SECONDS,
     measurement_seconds: float = DEFAULT_MEASUREMENT_SECONDS,
     on_progress: Optional[Callable[[Progress], None]] = None,
-) -> Tuple[BenchmarkResult, ...]:
+) -> SuiteResult:
     """Run single_core then multi_core; stop after failure or cancellation."""
     results = []
     for benchmark in BENCHMARKS:
@@ -161,4 +162,4 @@ def run_all(
         results.append(result)
         if not result.success:
             break
-    return tuple(results)
+    return SuiteResult.from_results(tuple(results))

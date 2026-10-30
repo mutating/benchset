@@ -260,7 +260,7 @@ assert PI_REFERENCE_RUN.started_at.utcoffset().total_seconds() == 0
 assert json.loads(json.dumps(asdict(PI_REFERENCE_RUN)))['warmup_seconds'] == 1248
 results = [BenchmarkResult('single_core'), run('unknown'),
            BenchmarkRunner().run('multi_core', warmup_seconds=-1)]
-results.extend(run_all(measurement_seconds=0))
+results.extend(run_all(measurement_seconds=0).results)
 assert len(results) == 4
 for result in results:
     assert result.pi_equivalent is None
@@ -366,6 +366,11 @@ def test_multiplier_is_a_real_optional_field_appended_after_legacy_positional_ar
 def test_ctypes_maps_multiplier_without_recalculation_and_respects_status_and_presence(
     monkeypatch: pytest.MonkeyPatch, benchmark: str, status: int, has_ratio: int, ratio: float,
 ) -> None:
+    """Honor native status/presence without recomputing or losing double precision.
+
+    The wire fixture leaves nonzero C padding after the uint32 presence flag;
+    reading that padding as part of a wider flag must not fabricate a ratio.
+    """
     native = Native()
     library = ResultLibrary(status, None, 0)
     library.value.pi_equivalent = ratio
@@ -583,7 +588,7 @@ def test_run_all_preserves_individual_native_multipliers_and_forwarded_settings(
                                pi_equivalent=ratio if current_status == 'completed' else None)
 
     monkeypatch.setattr(api, 'run', execute)
-    results = run_all(warmup_seconds=0.25, measurement_seconds=0.75, on_progress=callback)
+    results = run_all(warmup_seconds=0.25, measurement_seconds=0.75, on_progress=callback).results
     for result in results:
         assert_result_references(result)
     assert names == list(BENCHMARKS[:stop_index + 1])
@@ -612,13 +617,20 @@ def test_cli_renders_native_multiplier_including_zero_tiny_large_and_unavailable
 def test_cli_preserves_native_ratio_streams_exit_status_and_selection(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str, code: int, benchmark: str,
 ) -> None:
+    """Display each authoritative ratio and derive a non-unit aggregate from them.
+
+    Completed unstable results still contribute to the non-unit mean, guarding
+    against filtering them out or hardcoding a unit summary in CLI orchestration.
+    Failure and cancellation still route unavailable scores to stderr.
+    """
     calls: List[str] = []
 
     def execute(_self: BenchmarkRunner, name: str, **_options: Any) -> BenchmarkResult:
         calls.append(name)
-        ratio = 0.5 if name == 'single_core' else 2.0
+        ratio = 0.5 if name == 'single_core' else 8.0
         return BenchmarkResult(name, status=status, score=123.5 if status == 'completed' else None,
-                               pi_equivalent=ratio if status == 'completed' else None)
+                               pi_equivalent=ratio if status == 'completed' else None,
+                               unstable=status == 'completed')
 
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
     assert cli.main(['--bench', benchmark, '--warmup', '0', '--duration', '0.01']) == code
@@ -630,11 +642,15 @@ def test_cli_preserves_native_ratio_streams_exit_status_and_selection(
     text = captured.out if status == 'completed' else captured.err
     assert bool(captured.out) == (status == 'completed')
     assert bool(captured.err) == (status != 'completed')
-    assert text.count('Pi equivalent') == len(expected_calls)
+    assert sum(line.startswith('Pi equivalent') for line in text.splitlines()) == len(expected_calls)
+    if benchmark == 'all':
+        assert 'Full Pi equivalent : ' + ('2 × pi' if status == 'completed' else '—') in text  # noqa: RUF001
+    else:
+        assert 'Full Pi equivalent' not in text
     for name in expected_calls:
         assert name in text
         if status == 'completed':
-            assert ('0.5 \u00d7 pi' if name == 'single_core' else '2 \u00d7 pi') in text
+            assert ('0.5 \u00d7 pi' if name == 'single_core' else '8 \u00d7 pi') in text
         else:
             assert '—' in text
 

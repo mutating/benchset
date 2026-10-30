@@ -55,7 +55,7 @@ def test_measurement_and_samples() -> None:
 
 
 def test_all_benchmarks() -> None:
-    results = run_all(warmup_seconds=0, measurement_seconds=0.08)
+    results = run_all(warmup_seconds=0, measurement_seconds=0.08).results
     assert [result.benchmark for result in results] == ['single_core', 'multi_core']
     assert all(result.success for result in results)
     references = {value.benchmark: value.score for value in PI_REFERENCE_RUN.results}
@@ -137,12 +137,20 @@ def test_busy_and_external_cancellation() -> None:
     ('single_core', 0, 0), ('single_core', 0, math.inf),
 ])
 def test_invalid_options(name: str, warmup: float, duration: float) -> None:
+    """Reject invalid options with a reason that identifies the caller's mistake.
+
+    Returning only the unknown name, or a generic failure, leaves users unable
+    to distinguish an unsupported benchmark from invalid timing parameters.
+    """
     result = run(name, warmup_seconds=warmup, measurement_seconds=duration)
     assert_result_references(result)
     assert not result.success
     assert result.score is None
     assert result.pi_equivalent is None
     assert result.reason
+    if name == 'unknown':
+        assert 'benchmark' in result.reason
+        assert name in result.reason
 
 
 def test_native_invalid_abi_and_pre_cancel() -> None:

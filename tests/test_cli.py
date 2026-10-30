@@ -39,6 +39,7 @@ def assert_short_cli_completed_or_no_work(
     output, errors = output.replace('\r\n', '\n'), errors.replace('\r\n', '\n')
     assert '\r' not in output + errors
     assert '\x1b' not in output + errors
+    output, errors = check_suite_summary(output, errors, names, result.returncode)
     completed = output.rstrip().split('\n\n') if output else []
     failed = errors.rstrip().split('\n\n') if errors else []
     if failed:
@@ -49,42 +50,59 @@ def assert_short_cli_completed_or_no_work(
         assert result.returncode == 0, errors
         assert len(completed) == len(names)
     for index, section in enumerate(completed + failed):
-        table, samples = section.split('Samples:\n')
-        fields = {key.strip(): value.strip() for key, value in (
-            line.split(' : ', 1) for line in table.splitlines()
-        )}
-        assert len(fields) == len(table.splitlines())
-        assert fields['Benchmark'] == names[index]
-        assert fields['Version'] == __version__
-        assert fields['Reference machine'] == f'{PI_REFERENCE_MACHINE.name} ({PI_REFERENCE_MACHINE.short_name})'
-        assert float(fields['Warmup seconds']) == warmup
-        assert float(fields['Measurement seconds']) == 0.03
-        assert fields['Unit'] == 'iterations/s'
-        if index < len(completed):
-            assert fields['Reason'] in ('—', '-', '\\u2014')
-            assert fields['Status'] == 'completed'
-            number, unit = fields['Pi equivalent'].split(' \u00d7 ' if encoding == 'utf-8' else ' x ')
-            assert float(number) > 0
-            assert unit == 'pi'
-        else:
-            # A delayed worker may miss the short measurement window entirely.
-            unavailable = fields['Score']
-            assert unavailable in ('—', '-', '\\u2014')
-            assert fields['Status'] == 'failed'
-            assert fields['Reason'] == 'measurement window was too short to complete any work'
-            assert fields['Success'] == fields['Unstable'] == 'False'
-            assert fields['Iterations'] == '0'
-            assert fields['Score'] == fields['Pi equivalent'] == fields['Variation percent'] == unavailable
-            if warmup == 0:
-                assert fields['Checksum'] == '0'
-            if samples != '  ' + unavailable:
-                rows = [[cell.strip() for cell in row.split('|')] for row in samples.splitlines()]
-                assert rows[0] == ['elapsed s', 'duration s', 'iterations', 'iterations/s']
-                for elapsed, duration, iterations, rate in rows[1:]:
-                    assert float(elapsed) >= 0
-                    assert float(duration) > 0
-                    assert int(iterations) == float(rate) == 0
+        check_cli_section(section, names[index], warmup, encoding, index < len(completed))
 
+
+def check_suite_summary(output: str, errors: str, names: List[str], code: int) -> Tuple[str, str]:
+    summaries = [line for line in (output + errors).splitlines() if line.startswith('Full Pi equivalent')]
+    if summaries:
+        assert len(names) == 2
+        assert len(summaries) == 1
+        if code == 0:
+            assert float(summaries[0].split(' : ')[1].split()[0]) > 0
+        else:
+            assert summaries[0].split(' : ')[1] in ('—', '-', '\\u2014')
+        output = '\n'.join(line for line in output.splitlines() if not line.startswith('Full Pi equivalent')).rstrip()
+        errors = '\n'.join(line for line in errors.splitlines() if not line.startswith('Full Pi equivalent')).rstrip()
+    return output, errors
+
+
+def check_cli_section(section: str, name: str, warmup: float, encoding: str, completed: bool) -> None:
+    table, samples = section.split('Samples:\n')
+    fields = {key.strip(): value.strip() for key, value in (
+        line.split(' : ', 1) for line in table.splitlines()
+    )}
+    assert len(fields) == len(table.splitlines())
+    assert fields['Benchmark'] == name
+    assert fields['Version'] == __version__
+    assert fields['Reference machine'] == f'{PI_REFERENCE_MACHINE.name} ({PI_REFERENCE_MACHINE.short_name})'
+    assert float(fields['Warmup seconds']) == warmup
+    assert float(fields['Measurement seconds']) == 0.03
+    assert fields['Unit'] == 'iterations/s'
+    if completed:
+        assert fields['Reason'] in ('—', '-', '\\u2014')
+        assert fields['Status'] == 'completed'
+        number, unit = fields['Pi equivalent'].split(' \u00d7 ' if encoding == 'utf-8' else ' x ')
+        assert float(number) > 0
+        assert unit == 'pi'
+    else:
+        # A delayed worker may miss the short measurement window entirely.
+        unavailable = fields['Score']
+        assert unavailable in ('—', '-', '\\u2014')
+        assert fields['Status'] == 'failed'
+        assert fields['Reason'] == 'measurement window was too short to complete any work'
+        assert fields['Success'] == fields['Unstable'] == 'False'
+        assert fields['Iterations'] == '0'
+        assert fields['Score'] == fields['Pi equivalent'] == fields['Variation percent'] == unavailable
+        if warmup == 0:
+            assert fields['Checksum'] == '0'
+        if samples != '  ' + unavailable:
+            rows = [[cell.strip() for cell in row.split('|')] for row in samples.splitlines()]
+            assert rows[0] == ['elapsed s', 'duration s', 'iterations', 'iterations/s']
+            for elapsed, duration, iterations, rate in rows[1:]:
+                assert float(elapsed) >= 0
+                assert float(duration) > 0
+                assert int(iterations) == float(rate) == 0
 
 @pytest.mark.parametrize('encoding', ['ascii', 'cp1251', 'utf-8'])
 @pytest.mark.parametrize('newline', ['\n', '\r\n'])
@@ -249,10 +267,10 @@ def test_defaults_repeated_options_and_environment_independence(
     output = capsys.readouterr()
     assert not output.err
     sections = output.out.rstrip('\n').split('\n\n')
-    assert len(sections) == 2
+    assert len(sections) == 3
     assert sections[0].startswith('Benchmark')
     assert sections[1].startswith('Benchmark')
-    assert output.out.endswith('  —\n')
+    assert sections[2] == 'Full Pi equivalent : 1 × pi'  # noqa: RUF001
     calls.clear()
     assert cli.main(['--bench=all', '--bench', 'multi_core', '--warmup=0.5', '--warmup=-0.0',
                      '--duration=2', '--duration', '+.03']) == 0
@@ -419,19 +437,107 @@ def test_render_handles_real_stream_encodings_without_losing_values(encoding: st
     stream.detach()
 
 
+@pytest.mark.parametrize('stage', ['start', 'join'])
+def test_sigint_at_worker_lifecycle_boundaries_waits_for_teardown(stage: str) -> None:
+    """Defer Ctrl+C until the CLI's worker has actually stopped, then restore SIGINT.
+
+    Events force interruption immediately after startup or at join with teardown
+    still blocked. A separate completion witness avoids trusting Thread's own
+    bookkeeping after an interrupted join. The child contains real signals and
+    always releases its fake backend, so this needs neither CPU work nor sleeps.
+    """
+    program = 'STAGE = ' + repr(stage) + '''
+import signal
+from threading import Event, Thread
+from benchset import BenchmarkResult, cli
+entered, cancelled, release, finished = (Event() for _ in range(4))
+workers = []
+class Runner:
+    def cancel(self): cancelled.set()
+    def run(self, name, **options):
+        entered.set()
+        if STAGE == 'start':
+            assert cancelled.wait(5), 'the CLI did not cancel its live worker'
+            return BenchmarkResult(name, status='cancelled', workers=1)
+        return BenchmarkResult(name, status='completed', score=1, pi_equivalent=1, workers=1)
+class Worker(Thread):
+    armed = True
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        workers.append(self)
+    def start(self):
+        super().start()
+        if STAGE == 'start':
+            assert entered.wait(2)
+            signal.raise_signal(signal.SIGINT)
+    def run(self):
+        try:
+            super().run()
+            if STAGE == 'join': assert release.wait(5)
+        finally:
+            finished.set()
+    def join(self, *args, **kwargs):
+        if STAGE == 'join' and self.armed:
+            self.armed = False
+            signal.raise_signal(signal.SIGINT)
+            release.set()
+        return super().join(*args, **kwargs)
+cli.BenchmarkRunner = Runner
+cli.Thread = Worker
+signal.signal(signal.SIGINT, signal.default_int_handler)
+try:
+    code = cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '1'])
+    assert finished.is_set(), 'CLI returned before worker teardown'
+    assert workers and all(not worker.is_alive() for worker in workers)
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert code == 130
+finally:
+    cancelled.set()
+    release.set()
+    for worker in workers: Thread.join(worker, timeout=5)
+'''
+    result = subprocess.run([sys.executable, '-c', program], capture_output=True,
+                            text=True, check=False, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'Traceback' not in result.stderr
+
+
 def test_sample_columns_and_result_labels_align_even_with_large_values() -> None:
+    """Keep every diagnostic readable and correctly labeled across wide numeric values.
+
+    Checking values as well as alignment rejects a blank/missing column or a
+    mislabeled result that would still form a visually well-aligned table.
+    """
     result = BenchmarkResult('multi_core', status='completed', score=123.5, pi_equivalent=2,
+                             workers=2**32 - 1, warmup_seconds=1.25, measurement_seconds=3.5,
+                             elapsed_seconds=4321.123456, iterations=2**64 - 9, checksum=2**64 - 3,
+                             variation_percent=12.25, unstable=True,
                              samples=(Sample(1, 1, 1, 1),
                                       Sample(123456.123456, 123455.123456, 2**64 - 1, 123456789.123)))
     output = io.StringIO()
     cli.render(result, output)
     fields, samples = output.getvalue().split('Samples:\n')
     assert len({line.index(' : ') for line in fields.splitlines()}) == 1
+    records = {key.strip(): value.strip() for key, value in
+               (line.split(' : ', 1) for line in fields.splitlines())}
+    assert records == {
+        'Benchmark': 'multi_core', 'Version': __version__, 'Status': 'completed', 'Success': 'True',
+        'Reason': '—', 'Score': '123.500', 'Unit': 'iterations/s',
+        'Reference machine': 'Raspberry Pi 5 Model B Rev 1.0 (pi)', 'Pi equivalent': '2 \u00d7 pi',
+        'Workers': '4294967295', 'Warmup seconds': '1.25', 'Measurement seconds': '3.5',
+        'Actual measurement seconds': '4321.123456', 'Iterations': '18446744073709551607',
+        'Checksum': '18446744073709551613', 'Variation percent': '12.250', 'Unstable': 'True',
+    }
     rows = samples.splitlines()
     assert len(rows) == 3
     assert len({tuple(index for index, character in enumerate(row) if character == '|') for row in rows}) == 1
     assert str(2**64 - 1) in rows[-1]
     assert '123,456,789.123' in rows[-1]
+    assert [[cell.strip() for cell in row.split('|')] for row in rows] == [
+        ['elapsed s', 'duration s', 'iterations', 'iterations/s'],
+        ['1.000000', '1.000000', '1', '1.000'],
+        ['123456.123456', '123455.123456', '18446744073709551615', '123,456,789.123'],
+    ]
 
 
 @pytest.mark.parametrize('status', ['completed', 'failed', 'cancelled'])
@@ -475,10 +581,16 @@ def test_redirected_result_is_flushed_before_the_next_benchmark_starts(monkeypat
     assert 'multi_core' in output.published
 
 
-@pytest.mark.parametrize('columns', [1, 8, 20, 40, 80, 120])
+@pytest.mark.parametrize('columns', [1, 8, 20, 26, 27, 30, 31, 32, 40, 80, 120])
 def test_terminal_progress_fits_and_erases_previous_longer_phases(
     monkeypatch: pytest.MonkeyPatch, columns: int,
 ) -> None:
+    """Keep benchmark context when it fits and shorten to an intact phase when needed.
+
+    Boundary widths reject partial benchmark names and needless loss of context;
+    All widths must avoid wrapping, report each actual percentage, and erase
+    the full preceding frame rather than merely emitting some whitespace.
+    """
     class Terminal(io.StringIO):
         def isatty(self) -> bool:
             return True
@@ -500,6 +612,15 @@ def test_terminal_progress_fits_and_erases_previous_longer_phases(
     assert len(fragments) == 4
     assert all(len(part) <= max(1, columns - 1) for part in fragments)
     assert fragments[-1].isspace()
+    assert len(fragments[-1]) == len(fragments[-2].rstrip())
+    limit = max(1, columns - 1)
+    for fragment, (phase, fraction) in zip(fragments, [('warmup', 0), ('measurement', .5), ('completed', 1)]):
+        percentage = f'{fraction * 100:5.1f}%'
+        assert fragment.rstrip().endswith(percentage[-limit:].strip())
+        if len(f'single_core: {phase} {percentage}') <= limit:
+            assert fragment.startswith('single_core: ' + phase)
+        elif len(f'{phase} {percentage}') <= limit:
+            assert fragment.startswith(phase + ' ')
     if columns >= 20:
         assert 'measurement' in progress
         assert '100.0%' in progress
@@ -854,7 +975,8 @@ def test_real_ctrl_c_cancels_each_phase_and_stops_the_suite(
         assert 'cancelled' in errors
         assert 'Traceback' not in errors
         assert 'multi_core' not in errors
-        assert errors.count('Pi equivalent') == 1
+        assert sum(line.startswith('Pi equivalent') for line in errors.splitlines()) == 1
+        assert 'Full Pi equivalent : —' in errors
     finally:
         if process.poll() is None:
             process.kill()
