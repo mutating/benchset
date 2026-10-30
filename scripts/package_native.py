@@ -2,6 +2,7 @@
 
 No Xcode project or xcodebuild is required: this XCFramework contains a static
 C library. A macOS SDK, lipo and both Rust macOS targets are required.
+Every package is a fresh snapshot, including when generated outputs already exist.
 """
 import argparse
 import plistlib
@@ -14,6 +15,7 @@ from pathlib import Path
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts.cargo import target_directory
 from scripts.version import sync_version
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +28,12 @@ def archive(source, destination):
                 output.write(path, path.relative_to(source))
 
 
+def fresh_directory(directory):
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', required=True)
@@ -34,8 +42,9 @@ def main():
     sync_version(ROOT)
     subprocess.run(['cargo', 'build', '--release', '--locked', '--target', args.target], cwd=ROOT, check=True)
     staging = ROOT / 'release-artifacts' / args.target
-    staging.mkdir(parents=True, exist_ok=True)
-    source = ROOT / 'target' / args.target / 'release'
+    fresh_directory(staging)
+    cargo_output = target_directory(ROOT)
+    source = cargo_output / args.target / 'release'
     (staging / 'lib').mkdir(exist_ok=True)
     for filename in ('libbenchset.a', 'benchset.lib', 'libbenchset.dylib', 'libbenchset.so',
                      'benchset.dll', 'benchset.dll.lib'):
@@ -59,11 +68,12 @@ def main():
     for target in ('aarch64-apple-darwin', 'x86_64-apple-darwin'):
         subprocess.run(['cargo', 'build', '--release', '--locked', '--target', target], cwd=ROOT, check=True)
     framework = ROOT / 'Artifacts/Benchset.xcframework'
+    fresh_directory(framework)
     library = framework / 'macos-arm64_x86_64'
     library.mkdir(parents=True, exist_ok=True)
     subprocess.run(['lipo', '-create',
-                    str(ROOT / 'target/aarch64-apple-darwin/release/libbenchset.a'),
-                    str(ROOT / 'target/x86_64-apple-darwin/release/libbenchset.a'),
+                    str(cargo_output / 'aarch64-apple-darwin/release/libbenchset.a'),
+                    str(cargo_output / 'x86_64-apple-darwin/release/libbenchset.a'),
                     '-output', str(library / 'libbenchset.a')], check=True)
     shutil.copytree(ROOT / 'include', library / 'Headers', dirs_exist_ok=True)
     metadata = {
@@ -77,7 +87,7 @@ def main():
     with (framework / 'Info.plist').open('wb') as output:
         plistlib.dump(metadata, output)
     swift_package = ROOT / 'release-artifacts/Benchset-Swift'
-    swift_package.mkdir(exist_ok=True)
+    fresh_directory(swift_package)
     shutil.copy2(ROOT / 'Package.swift', swift_package / 'Package.swift')
     shutil.copytree(ROOT / 'Sources', swift_package / 'Sources', dirs_exist_ok=True)
     shutil.copytree(ROOT / 'tests/swift', swift_package / 'tests/swift', dirs_exist_ok=True)

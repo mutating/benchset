@@ -21,6 +21,29 @@ fn config() -> Config {
     assert_eq!(unsafe { benchset_default_config(value.as_mut_ptr()) }, 1);
     unsafe { value.assume_init() }
 }
+
+/// Free must destroy the owned handle, not merely discard its raw address.
+/// Its existing cancellation Arc supplies a destruction witness without a
+/// global allocator hook or any read through the pointer after it is freed.
+#[test]
+fn free_releases_the_handles_owned_state() {
+    for used in [false, true] {
+        unsafe {
+            let handle = benchset_create();
+            assert!(!handle.is_null());
+            if used {
+                assert_eq!(
+                    benchset_run(handle, std::ptr::null(), None, std::ptr::null_mut()),
+                    Status::Failed as u32
+                );
+            }
+            let witness = std::sync::Arc::downgrade(&(*handle).cancellation.0);
+            assert_eq!(witness.strong_count(), 1);
+            benchset_free(handle);
+            assert!(witness.upgrade().is_none());
+        }
+    }
+}
 unsafe fn result(handle: *const Handle) -> CResult {
     let mut out = MaybeUninit::uninit();
     assert_eq!(benchset_result(handle, out.as_mut_ptr()), 1);

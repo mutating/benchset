@@ -92,6 +92,19 @@ macro_rules! offset {
     }};
 }
 
+macro_rules! wire_layout {
+    ($ty:ty, $size:expr, $($field:tt => $offset:expr),+ $(,)?) => {{
+        // These wire records contain only numeric fields and nullable raw
+        // pointers. Zero initializes valid values; offsets never dereference them.
+        let value: $ty = unsafe { std::mem::zeroed() };
+        assert_eq!((size::<$ty>(), align_of::<$ty>()), ($size, 8));
+        assert_eq!([$(offset!(value, $field)),+], [$($offset),+]);
+    }};
+}
+
+/// Freeze both sides of the supported 64-bit C wire layout independently.
+/// Same-type field swaps preserve size and all typed Rust field reads, while
+/// making foreign consumers interpret unrelated diagnostics or progress values.
 #[test]
 fn extended_and_metadata_c_layout_is_explicit() {
     let (machine, run, results) = metadata();
@@ -116,13 +129,24 @@ fn extended_and_metadata_c_layout_is_explicit() {
     assert_eq!(offset!(linked, base), 0);
     assert_eq!(offset!(linked, reference_machine), 104);
     assert_eq!(offset!(linked, reference_run), 112);
-    assert_eq!(offset!(result, score), 16);
-    assert_eq!(offset!(result, iterations), 56);
-    assert_eq!(offset!(result, has_variation), 84);
+    wire_layout!(Config, 32, abi_version => 0, struct_size => 4, benchmark => 8,
+        reserved => 12, warmup_seconds => 16, measurement_seconds => 24);
+    wire_layout!(CProgress, 40, phase => 0, workers => 4, fraction => 8,
+        phase_elapsed_seconds => 16, phase_duration_seconds => 24, iterations => 32);
+    wire_layout!(CResult, 88, abi_version => 0, status => 4, benchmark => 8, workers => 12,
+        score => 16, warmup_seconds => 24, measurement_seconds => 32, elapsed_seconds => 40,
+        variation_percent => 48, iterations => 56, checksum => 64, sample_count => 72,
+        unstable => 80, has_variation => 84);
+    wire_layout!(CSample, 32, elapsed_seconds => 0, duration_seconds => 8,
+        iterations => 16, iterations_per_second => 24);
+    wire_layout!(super::suite::CAggregatedScores, 16, pi_equivalent => 0, has_pi_equivalent => 8);
+    wire_layout!(super::suite::CSuiteResult, 32, results => 0, result_count => 8, aggregated_scores => 16);
+    wire_layout!(super::suite::CSuiteProgress, 48, benchmark => 0, progress => 8);
     assert_eq!(
         (size::<CReferenceMachine>(), align_of::<CReferenceMachine>()),
         (56, 8)
     );
+    assert_eq!(offset!(machine, name), 0);
     assert_eq!(offset!(machine, short_name), 8);
     assert_eq!(offset!(machine, os_name), 16);
     assert_eq!(offset!(machine, os_version), 24);
@@ -133,6 +157,7 @@ fn extended_and_metadata_c_layout_is_explicit() {
         (size::<CReferenceRun>(), align_of::<CReferenceRun>()),
         (40, 8)
     );
+    assert_eq!(offset!(run, started_at_unix_seconds), 0);
     assert_eq!(offset!(run, start_temperature_c), 8);
     assert_eq!(offset!(run, end_temperature_c), 16);
     assert_eq!(offset!(run, warmup_seconds), 24);
@@ -144,6 +169,7 @@ fn extended_and_metadata_c_layout_is_explicit() {
         ),
         (16, 8)
     );
+    assert_eq!(offset!(results[0], benchmark), 0);
     assert_eq!(offset!(results[0], score), 8);
 }
 

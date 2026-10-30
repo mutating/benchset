@@ -103,6 +103,37 @@ int32_t benchset_reference_result(uint64_t index, BenchsetReferenceBenchmarkResu
 int32_t benchset_sample(const BenchsetHandle *, uint64_t index, BenchsetSample *out);
 const char *benchset_reason(const BenchsetHandle *);
 void benchset_free(BenchsetHandle *);
+
+/* Full-suite API. Existing single-benchmark ABI layouts remain unchanged. */
+typedef struct BenchsetSuiteHandle BenchsetSuiteHandle;
+typedef struct {
+    double pi_equivalent; /* Geometric mean: exp(mean(log(Pi equivalent))); zero if any value is zero. */
+    uint32_t has_pi_equivalent; /* Absent unless the complete suite succeeded. */
+} BenchsetAggregatedScores;
+typedef struct {
+    const BenchsetResultV3 *results; /* Immutable array, borrowed until suite_free. */
+    uint64_t result_count;
+    BenchsetAggregatedScores aggregated_scores;
+} BenchsetSuiteResult;
+typedef struct {
+    uint32_t benchmark;
+    BenchsetProgress progress;
+} BenchsetSuiteProgress;
+typedef void (*BenchsetSuiteProgressCallback)(const BenchsetSuiteProgress *, void *);
+BenchsetSuiteHandle *benchset_suite_create(void);
+/* Single-use handle; config.benchmark is ignored. Runs single_core then
+ * multi_core, stopping after failure/cancellation. Same callback and lifetime
+ * rules as benchset_run. Returns the final individual result's status. */
+uint32_t benchset_run_all(BenchsetSuiteHandle *, const BenchsetConfig *, BenchsetSuiteProgressCallback, void *);
+void benchset_suite_cancel(BenchsetSuiteHandle *);
+/* Getters return 1 on success, 0 on NULL/wrong size/unavailable index, leaving
+ * output unchanged on failure. All indices are zero-based. */
+int32_t benchset_suite_result(const BenchsetSuiteHandle *, BenchsetSuiteResult *, uint32_t out_size);
+int32_t benchset_suite_result_at(const BenchsetSuiteHandle *, uint64_t index, BenchsetResultV3 *, uint32_t out_size);
+int32_t benchset_suite_sample(const BenchsetSuiteHandle *, uint64_t result_index, uint64_t sample_index, BenchsetSample *);
+/* Borrowed until suite_free; calibration pointers keep their global lifetime. */
+const char *benchset_suite_reason(const BenchsetSuiteHandle *, uint64_t index);
+void benchset_suite_free(BenchsetSuiteHandle *);
 #ifdef __cplusplus
 }
 #endif

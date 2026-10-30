@@ -4,6 +4,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from setuptools import Distribution, setup
@@ -12,6 +13,7 @@ from setuptools.command.develop import develop
 from wheel.bdist_wheel import bdist_wheel
 
 from scripts.build_backend import rust_environment
+from scripts.cargo import target_directory
 from scripts.version import sync_version
 
 ROOT = Path(__file__).parent.resolve()
@@ -63,10 +65,14 @@ class BuildNative(build_py):
         package = ROOT / 'benchset' if self.editable_mode else Path(self.build_lib) / 'benchset'
         destination = package / '_native'
         destination.mkdir(parents=True, exist_ok=True)
+        # Readers keep the old complete library until its replacement is ready.
+        with tempfile.TemporaryDirectory(dir=destination) as temporary:
+            staged = Path(temporary) / filename
+            shutil.copy2(target_directory(ROOT, environment) / target / 'release' / filename, staged)
+            staged.replace(destination / filename)
         for old in destination.iterdir():
-            if old.suffix in ('.so', '.dll', '.dylib'):
-                old.unlink()
-        shutil.copy2(ROOT / 'target' / target / 'release' / filename, destination / filename)
+            if old.name != filename and old.suffix in ('.so', '.dll', '.dylib'):
+                old.unlink(missing_ok=True)
 
 
 class PlatformWheel(bdist_wheel):

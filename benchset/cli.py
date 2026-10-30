@@ -18,8 +18,10 @@ from benchset.models import (
     BENCHMARKS,
     DEFAULT_MEASUREMENT_SECONDS,
     DEFAULT_WARMUP_SECONDS,
+    AggregatedScores,
     BenchmarkResult,
     Progress,
+    SuiteResult,
     __version__,
 )
 
@@ -132,7 +134,16 @@ def render(result: BenchmarkResult, stream: TextIO) -> None:
                      for row in rows)
     else:
         lines.append('  —')
-    text = '\n'.join(lines) + '\n'
+    _write(stream, '\n'.join(lines) + '\n')
+
+
+def render_suite(result: SuiteResult, stream: TextIO) -> None:
+    equivalent = result.aggregated_scores.pi_equivalent
+    value = '—' if equivalent is None else f'{equivalent:.12g} × pi'  # noqa: RUF001
+    _write(stream, f'Full Pi equivalent : {value}\n')
+
+
+def _write(stream: TextIO, text: str) -> None:
     try:
         stream.write(text)
     except UnicodeEncodeError:
@@ -196,40 +207,36 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 130
 
 
+def _execute_benchmark(  # noqa: PLR0913 — explicit state passed to the worker thread.
+    runner: BenchmarkRunner, name: str, config: Settings, progress: _Progress,
+    results: List[BenchmarkResult], done: Event,
+) -> None:
+    try:
+        results.append(runner.run(
+            name, warmup_seconds=config.warmup, measurement_seconds=config.duration,
+            on_progress=progress,
+        ))
+    except Exception as error:  # noqa: BLE001 — return background failures to the console.
+        results.append(BenchmarkResult(benchmark=name, reason=str(error)))
+    finally:
+        done.set()
+
+
 def _main(argv: Optional[List[str]]) -> int:
     try:
         config = settings(list(sys.argv[1:] if argv is None else argv))
     except SystemExit as exit_status:
         return int(exit_status.code or 0)
     names = BENCHMARKS if config.bench == 'all' else (config.bench,)
+    suite_results: List[BenchmarkResult] = []
     for name in names:
         runner = BenchmarkRunner()
         results: List[BenchmarkResult] = []
         done = Event()
         progress = _Progress()
 
-        def execute(
-            current: str = name,
-            current_runner: BenchmarkRunner = runner,
-            current_progress: _Progress = progress,
-            output: List[BenchmarkResult] = results,
-            completion: Event = done,
-        ) -> None:
-            try:
-                output.append(
-                    current_runner.run(
-                        current,
-                        warmup_seconds=config.warmup,
-                        measurement_seconds=config.duration,
-                        on_progress=current_progress,
-                    ),
-                )
-            except Exception as error:  # noqa: BLE001 — return background failures to the console.
-                output.append(BenchmarkResult(benchmark=current, reason=str(error)))
-            finally:
-                completion.set()
-
-        worker = Thread(target=execute, name='benchset-cli')
+        worker = Thread(target=_execute_benchmark, args=(runner, name, config, progress, results, done),
+                        name='benchset-cli')
         interrupted = False
 
         def interrupt(_signum: int, _frame: Optional[FrameType]) -> None:
@@ -257,14 +264,20 @@ def _main(argv: Optional[List[str]]) -> int:
                 signal.signal(signal.SIGINT, previous_handler)
         progress.clear()
         result = results[0]
+        suite_results.append(result)
         stream = sys.stdout if result.success and not interrupted else sys.stderr
         if stream is not None:
             render(result, stream)
             stream.flush()
-        if interrupted or result.status == 'cancelled':
-            return 130
-        if not result.success:
-            return 1
+        exit_code = 130 if interrupted or result.status == 'cancelled' else (0 if result.success else 1)
+        if exit_code:
+            if config.bench == 'all' and sys.stderr is not None:
+                # SIGINT can arrive after the final native result completed.
+                render_suite(SuiteResult(tuple(suite_results), AggregatedScores()), sys.stderr)
+            return exit_code
         if name != names[-1]:
             sys.stdout.write('\n')
+    if config.bench == 'all':
+        sys.stdout.write('\n')
+        render_suite(SuiteResult.from_results(tuple(suite_results)), sys.stdout)
     return 0

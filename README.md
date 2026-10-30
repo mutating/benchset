@@ -11,6 +11,10 @@ Higher is faster. Each completed result also includes a **Pi equivalent**:
 its throughput divided by the same benchmark's sustained Raspberry Pi 5 score.
 `0.5` means half the Pi's throughput, `1.0` equal throughput, and `2.0` twice
 the Pi's throughput. The CLI prints both iterations/s and `Pi equivalent`.
+The full suite also returns **aggregated scores**. Its **Full Pi equivalent** is
+the geometric mean of the individual Pi equivalents, with equal weights.
+See [Full-suite score](#full-suite-score) for the formula, availability rules
+and the field to read in each interface.
 
 This README describes the current source tree. For changes not yet published,
 use `pip install .` or the local Rust/Swift dependencies described below.
@@ -61,8 +65,9 @@ suite stops after a failed or cancelled benchmark.
 Each result is flushed immediately, including when stdout is redirected.
 Progress fits the terminal width and is cleared before the result. Output
 uses `× pi` and `—` when the stream supports them, with `x pi` and `-` as
-fallbacks for restrictive encodings. A closed stdout pipe exits with code 1
-without a traceback.
+fallbacks for restrictive encodings. Streams configured with `backslashreplace`
+may emit Unicode escape sequences instead. A closed stdout pipe exits with
+code 1 without a traceback.
 
 For example, a completed result at half the reference throughput includes
 these lines (illustrative values; other fields and samples are omitted):
@@ -78,6 +83,60 @@ Pi equivalent              : 0.5 × pi
 The multiplier uses the full-precision native score, before display rounding.
 An unavailable multiplier is displayed as `—` (`-` in the fallback format).
 
+## Full-suite score
+
+Run the complete suite to obtain its overall score:
+
+| Interface | Run the suite | Read the Full Pi equivalent |
+|---|---|---|
+| CLI | `benchset` or `benchset --bench all` | Final `Full Pi equivalent` line |
+| Python | `suite = run_all(...)` (module-level function) | `suite.aggregated_scores.pi_equivalent` |
+| Rust | `let suite = benchset::run_all(options, &cancellation, callback);` | `suite.aggregated_scores.pi_equivalent` |
+| Swift | `let suite = try runner.runAll(...)` | `suite.aggregatedScores.piEquivalent` |
+| C / C++ | `benchset_run_all(...)`, then `benchset_suite_result(...)` | `suite.aggregated_scores.pi_equivalent` when `has_pi_equivalent != 0` |
+
+For each benchmark, let `r = score / that_benchmark_reference_score`.
+For positive ratios, the full score is `exp(sum(ln(r)) / benchmark_count)`.
+With the current two benchmarks this is mathematically
+`sqrt(r_single_core * r_multi_core)`. Each benchmark has equal weight,
+independently of its worker count or measurement duration. The resulting
+multiplier is dimensionless; individual `score` fields remain iterations/s.
+
+The implementations use natural logarithms and `exp` on the original,
+unrounded double-precision ratios. Log space avoids intermediate overflow or
+underflow from multiplying ratios. Any consistent logarithm base and its
+inverse give the same mathematical result; ordinary floating-point rounding
+still applies. For example, `0.5` and `2.0` produce exactly `1.0`, and `1.0`
+and `4.0` produce `2.0`. The first example's CLI summary is:
+
+```text
+Full Pi equivalent : 1 × pi
+```
+
+A full score requires exactly `single_core` then `multi_core`, both with
+`completed` status and a present, finite, nonnegative Pi equivalent. Completed
+unstable results participate. After validating the complete set, any zero ratio
+makes the full score `0.0`. Zero is a valid score: check `is not None` in Python,
+`Some` in Rust, `if let` in Swift, or the presence flag in C.
+
+An incomplete, failed or cancelled suite has no aggregate: `None` in
+Python/Rust, `nil` in Swift, or a zero presence flag in C. When a benchmark
+fails or is cancelled, a returned suite retains the completed prefix and the
+first unsuccessful result. Results assembled by callers must also have the
+complete order, without duplicates or
+extra entries. Use `SuiteResult.from_results(tuple_of_results)` in Python,
+`SuiteResult::new(results)` in Rust, or `SuiteResult(results: results)` in Swift
+to calculate the aggregate from their stored individual Pi equivalents.
+Python's direct `SuiteResult(results, aggregated_scores)` constructor stores
+the supplied fields; it does not calculate an aggregate.
+
+The CLI prints the summary on stdout after success or stderr after
+failure/cancellation, using `—` (`-` in the fallback format) when unavailable.
+An interrupted CLI call suppresses the aggregate even if its final native
+result had already completed. Selecting only one benchmark prints no suite
+summary. Progress fractions belong to the benchmark currently running and
+restart for the next benchmark.
+
 ## Python API
 
 Python 3.8–3.15, including free-threaded CPython, is supported. The wrapper uses
@@ -92,7 +151,15 @@ if result.success:
 else:
     print(result.status, result.reason)
 
-results = run_all(warmup_seconds=120, measurement_seconds=60)
+suite = run_all(warmup_seconds=120, measurement_seconds=60)
+results = suite.results  # Tuple[BenchmarkResult, ...]
+full_pi = suite.aggregated_scores.pi_equivalent
+if full_pi is not None:
+    print(f'Full Pi equivalent: {full_pi} x pi')
+else:
+    for item in results:
+        if not item.success:
+            print(item.benchmark, item.status, item.reason)
 print(result.reference_run.started_at, result.reference_run.results)
 ```
 
@@ -115,11 +182,21 @@ with ThreadPoolExecutor(max_workers=1) as pool:
 Callbacks execute on the thread calling `run`, approximately ten times per
 second and on observed phase transitions. A very short phase can finish before
 the coordinator reports it, so callback sequences may omit that phase.
-Callbacks receive the benchmark name, phase,
+Callbacks receive one `Progress` object containing the benchmark name, phase,
 worker count, overall fraction, phase elapsed/target time and completed
 iterations in that phase. Dispatch UI updates to the UI thread yourself and
 return promptly. A Python callback exception cancels the workload and produces
 a failed result; it does not propagate through C.
+
+`run_all()` returns an immutable `SuiteResult`, with `results` (a tuple of
+individual results in execution order) and `aggregated_scores: AggregatedScores`.
+The current aggregate is `pi_equivalent: Optional[float]`; see
+[Full-suite score](#full-suite-score) for its calculation and availability.
+`dataclasses.asdict(suite)` produces `{"results": ..., "aggregated_scores":
+{"pi_equivalent": ...}}`, including the individual results' nested calibration
+records. `dataclasses.asdict(result)` also works for a single benchmark.
+Consumers that previously iterated over `run_all()` directly should now iterate
+over `run_all().results`.
 
 `BenchmarkRunner.cancel()` is thread-safe and requests cancellation without
 waiting for the active call to finish. After `run()` returns, all native workers
@@ -320,9 +397,12 @@ settings are comparable.
 
 ## Embed in Rust
 
+Source consumers need Rust 1.74 or newer. Published native binaries use the
+pinned release toolchain described under [Publishing](#publishing).
+
 ```toml
 [dependencies]
-benchset = "0.0.3"
+benchset = "0.0.6"
 # For changes from a local source checkout, use:
 # benchset = { path = "../benchset" }
 ```
@@ -338,11 +418,23 @@ if let (Some(score), Some(equivalent)) = (result.score, result.pi_equivalent) {
     println!("{:?}: {}", result.status, result.reason);
 }
 println!("Reference warmup: {} s", result.reference_run.warmup_seconds);
+
+let suite_cancellation = Cancellation::default();
+let suite = benchset::run_all(Options::default(), &suite_cancellation, |benchmark, progress| {
+    println!("{}: {}", benchmark.name(), progress.fraction);
+});
+if let Some(full_pi) = suite.aggregated_scores.pi_equivalent {
+    println!("Full Pi equivalent: {full_pi} x pi");
+} else {
+    println!("Full Pi equivalent unavailable");
+}
+// suite.results contains the individual BenchmarkResult values in order.
 ```
 
-The cancellation token can be cloned and cancelled from another thread. It is
-sticky: create a new token for a new call. A short runnable example is in
-`examples/native/rust.rs`.
+The cancellation token can be cloned and cancelled from another thread. Once
+cancelled, it stays cancelled; create a fresh token for a subsequent uncancelled
+call. The suite uses the same token across both benchmarks. A short runnable
+example is in `examples/native/rust.rs`.
 
 ## Embed through C ABI
 
@@ -387,6 +479,37 @@ returns. The reason string is borrowed until the handle is freed; the version
 string is valid for the loaded library's lifetime. Progress pointers are
 borrowed only during the callback. Do not free a handle while it is in use or
 throw/unwind through a C callback. Invalid configuration produces a failed result.
+
+For a full suite, create a `BenchsetSuiteHandle` with `benchset_suite_create()`
+and call `benchset_run_all(handle, &config, callback, context)`. The benchmark
+selector is ignored; warmup and measurement settings apply to each benchmark.
+The callback receives `BenchsetSuiteProgress`, containing the benchmark ID and
+its progress. `benchset_run_all` returns the final individual result's status.
+After the call, `benchset_suite_result(handle, &suite, sizeof(suite))`
+fills a `BenchsetSuiteResult` with `results`, `result_count` and
+`aggregated_scores`, returning 1 on success or 0 if the getter fails.
+The immutable result array is borrowed until the handle is freed.
+Check `suite.aggregated_scores.has_pi_equivalent` before reading its
+`pi_equivalent` value. Read individual results with `benchset_suite_result_at`
+(V3 format), and diagnostics with `benchset_suite_sample` and
+`benchset_suite_reason`. Use `benchset_suite_cancel` and `benchset_suite_free`
+for cancellation and cleanup. The same single-use and lifetime rules apply.
+
+For example, using the initialized `config` above and no progress callback:
+
+```c
+BenchsetSuiteHandle *suite_handle = benchset_suite_create();
+if (!suite_handle) return 1;
+benchset_run_all(suite_handle, &config, NULL, NULL);
+BenchsetSuiteResult suite;
+if (benchset_suite_result(suite_handle, &suite, sizeof(suite)) &&
+    suite.aggregated_scores.has_pi_equivalent != 0) {
+    printf("Full Pi equivalent: %.12g x pi\n", suite.aggregated_scores.pi_equivalent);
+} else {
+    printf("Full Pi equivalent unavailable\n");
+}
+benchset_suite_free(suite_handle);
+```
 
 The C ABI version remains 1. The additive, size-checked
 `benchset_reference_machine`, `benchset_reference_run` and indexed
@@ -439,7 +562,7 @@ the same repository. Rust is not required by the consumer.
 For a Swift manifest, add:
 
 ```swift
-.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.3"))
+.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.6"))
 ```
 
 Add `.product(name: "Benchset", package: "benchset")` to your target's
@@ -465,8 +588,23 @@ if let score = result.score, let equivalent = result.piEquivalent {
     print(result.status, result.reason as Any)
 }
 print(result.referenceRun.startedAt, result.referenceRun.warmupSeconds)
-// Another thread may call runner.cancel() while run is active.
+let suite = try runner.runAll(warmupSeconds: 120, measurementSeconds: 60) { benchmark, progress in
+    print(benchmark, progress.fraction)
+}
+if let fullPi = suite.aggregatedScores.piEquivalent {
+    print("Full Pi equivalent: \(fullPi) x pi")
+} else {
+    print("Full Pi equivalent unavailable")
+}
+// suite.results contains the individual BenchmarkResult values in order.
+// Another thread may call runner.cancel() while run or runAll is active.
 ```
+
+`runAll` keeps the runner reserved across both benchmarks; cancellation also
+applies between its native handles. Native failure/cancellation returns the
+results obtained so far with a `nil` aggregate. Wrapper errors such as allocation
+failure or an unavailable native result throw `BenchsetError`; that call returns
+no `SuiteResult`.
 
 To build the Apple package from source:
 
@@ -496,15 +634,28 @@ are not part of the initial prebuilt matrix.
 python -m venv .venv
 # Activate the virtual environment using your shell's normal command.
 pip install -r requirements_dev.txt 'skelet>=0.0.21' wheel setuptools
-pip install .
-python scripts/build_native.py
-python -m pytest
-cargo test -- --test-threads=1
+pip install -e .
+python -m pytest tests
 python -m build
+# Native development commands additionally require Cargo on PATH:
+python scripts/build_native.py
+cargo test --locked -- --test-threads=1
 ```
 
-`scripts/build_native.py` makes the source Python package usable without an
-installation. Release wheels are platform-specific but interpreter-independent
+The editable install builds the native library and installs Python dependencies
+and package metadata. `scripts/build_native.py` rebuilds the library beside the
+Python source; it requires Cargo on PATH and does not install Python package
+metadata. Imports still need that metadata because the version is read through
+`importlib.metadata`. After changing the package version, reinstall the Python
+package so its metadata and native library agree. Python-only development can
+use `pip install -e .` to build with the private Rust bootstrap; it does not put
+Cargo on the shell's PATH for standalone native commands.
+
+Build and native packaging commands honor `CARGO_TARGET_DIR`; relative paths
+are resolved against the project directory. The frozen-crate verification uses
+the same Cargo output directory.
+
+Release wheels are platform-specific but interpreter-independent
 (`py3-none-<platform>`). The sdist includes the native source. Tests validate
 correctness, result accounting, progress, cancellation and API/CLI behavior;
 they do not enforce speed thresholds in CI.
@@ -523,6 +674,9 @@ The [test matrix](tests/coverage-plan.md) combines five independent reviews and
 covers measurement accounting, statistical boundaries, cancellation, reentry,
 callback failures, C ABI validation, ownership and CLI behavior. Tests use
 controlled initialization failures instead of exhausting machine resources.
+Full-suite tests also cover complete ordering, geometric means of unrounded
+ratios, zero/invalid/extreme values, early stopping, serialization and the
+aggregate's presence in each public interface.
 
 Python coverage includes statements and branches, including CLI subprocesses;
 CI installs a coverage startup hook for those subprocesses. Rust and Swift each

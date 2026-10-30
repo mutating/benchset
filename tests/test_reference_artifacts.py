@@ -11,9 +11,11 @@ import inspect
 import io
 import json
 import locale
+import math
 import os
 import platform
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -22,11 +24,10 @@ import venv
 import zipfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import pytest
 
-from scripts import check_source_install
 from scripts.check_source_install import INSTALLED_API_CHECK, verify_cli
 
 if TYPE_CHECKING:
@@ -110,15 +111,38 @@ def test_artifact_capture_uses_utf8_without_changing_the_callers_environment(
     assert environment == before
 
 
-@pytest.mark.parametrize('encoding', ['ascii', 'cp1251', 'utf-8'])
-def test_source_install_cli_capture_matches_its_echo_stream(
-    monkeypatch: pytest.MonkeyPatch, encoding: str,
+@pytest.mark.parametrize('configuration', [(encoding, count, invalid)
+    for encoding in ('ascii', 'cp1251', 'utf-8') for count, invalid in ((0, False), (1, False), (2, False), (2, True))])
+def test_source_install_cli_capture_matches_its_echo_stream(  # noqa: PLR0915 - one installed CLI process across its preparation and verification steps
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, configuration: Tuple[str, int, bool],
 ) -> None:
+    """Validate the isolated install commands as well as decoded CLI output.
+
+    Every install/API/dependency check must propagate failure, both CLI entry
+    points must run outside the checkout, and inherited Cargo directories must
+    be hidden so this gate actually exercises automatic toolchain bootstrap.
+    Running the entry point also prevents a removed main call from silently
+    disabling CI; a malformed child result must fail before it is echoed.
+    """
+    encoding, completed_count, invalid_output = configuration
     original_run = subprocess.run
     captured: List[subprocess.CompletedProcess] = []
-    program = '''
+    calls: List[Tuple[List[str], Dict[str, Any]]] = []
+    tool_paths = [tmp_path / name for name in ('other-tools', 'cargo-tools', 'windows-cargo-tools')]
+    for path in tool_paths:
+        path.mkdir()
+    (tool_paths[1] / 'cargo').touch()
+    (tool_paths[2] / 'cargo.exe').touch()
+    monkeypatch.setenv('PATH', os.pathsep.join(map(str, tool_paths)))
+    program = 'COMPLETED_COUNT = ' + str(completed_count) + '''
 from benchset import BenchmarkResult, BenchmarkRunner, cli
+calls = 0
 def completed(_self, name, *, warmup_seconds, measurement_seconds, **_options):
+    global calls
+    calls += 1
+    if calls > COMPLETED_COUNT:
+        return BenchmarkResult(name, reason='measurement window was too short to complete any work', workers=1,
+                               warmup_seconds=warmup_seconds, measurement_seconds=measurement_seconds)
     return BenchmarkResult(name, status='completed', score=1, pi_equivalent=1, workers=1,
                            warmup_seconds=warmup_seconds, measurement_seconds=measurement_seconds)
 BenchmarkRunner.run = completed
@@ -126,28 +150,60 @@ raise SystemExit(cli.main(['--warmup=0', '--duration=.05']))
 '''
 
     def run_step(arguments: List[str], **options: Any) -> subprocess.CompletedProcess:
+        calls.append((arguments, options.copy()))
         if options.get('capture_output'):
             options['env'] = dict(options['env'], PYTHONPATH=str(ROOT))
             result = original_run([sys.executable, '-c', program], **options)
+            if invalid_output:
+                result.stdout = result.stdout.replace(' x pi', ' x other').replace(' \u00d7 pi', ' \u00d7 other')
             captured.append(result)
             return result
         return subprocess.CompletedProcess(arguments, 0)
 
     buffer = io.BytesIO()
     stream = io.TextIOWrapper(buffer, encoding=encoding)
+    errors = io.StringIO()
     with monkeypatch.context() as scoped:
         scoped.setenv('PYTHONIOENCODING', 'utf-8')
         scoped.setattr(sys, 'stdout', stream)
+        scoped.setattr(sys, 'stderr', errors)
         scoped.setattr(subprocess, '_text_encoding', lambda: 'ascii', raising=False)
         scoped.setattr(locale, 'getpreferredencoding', lambda _setlocale=True: 'ascii')
         scoped.setattr(subprocess, 'run', run_step)
         scoped.setattr(shutil, 'which', lambda *_args, **_kwargs: None)
-        check_source_install.main()
+        scoped.setattr(sys, 'path', sys.path.copy())
+        if invalid_output:
+            with pytest.raises(RuntimeError, match='invalid completed result'):
+                runpy.run_path(str(ROOT / 'scripts/check_source_install.py'), run_name='__main__')
+        else:
+            runpy.run_path(str(ROOT / 'scripts/check_source_install.py'), run_name='__main__')
         stream.flush()
     text = buffer.getvalue().decode(encoding)
     stream.detach()
+    if invalid_output:
+        assert len(captured) == 1
+        assert len(calls) == 4
+        assert not text
+        assert not errors.getvalue()
+        return
     assert len(captured) == 2
-    assert text.count('1 \u00d7 pi' if encoding == 'utf-8' else '1 x pi') == 4
+    assert text.count('1 \u00d7 pi' if encoding == 'utf-8' else '1 x pi') == (6 if completed_count == 2 else completed_count * 2)
+    assert errors.getvalue().count('measurement window was too short to complete any work') == (0 if completed_count == 2 else 2)
+    assert len(calls) == 6
+    venv = Path(calls[0][0][-1])
+    python = venv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    console = venv / ('Scripts/benchset.exe' if os.name == 'nt' else 'bin/benchset')
+    assert calls[0] == ([sys.executable, '-m', 'venv', str(venv)], {'check': True})
+    assert calls[1][0] == [str(python), '-m', 'pip', 'install', str(ROOT)]
+    assert calls[2][0] == [str(python), '-c', INSTALLED_API_CHECK]
+    assert calls[3][0] == [str(console), '--warmup', '0', '--duration', '0.05']
+    assert calls[4][0] == [str(python), '-m', 'benchset', '--warmup', '0', '--duration', '0.05']
+    assert calls[5][0] == [str(python), '-m', 'pip', 'check']
+    for index, (_arguments, options) in enumerate(calls[1:], 1):
+        assert options['cwd'] == venv.parent
+        assert options['env']['PATH'] == str(tool_paths[0])
+        assert options['env']['PYTHONIOENCODING'] == encoding
+        assert options['check'] is (index not in (3, 4))
 
 
 @pytest.fixture(scope='module')
@@ -209,6 +265,12 @@ def test_artifact_build_environment_isolates_outputs_without_changing_parent(
 def test_unpacked_crate_builds_and_runs_a_public_rust_consumer(
     source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path,
 ) -> None:
+    """Compile shipped Rust APIs as an external crate, including the suite fields.
+
+    In-crate tests can access private fields. External progress/sample readers
+    protect diagnostics, cancellation, defaults and suite types from accidental
+    visibility loss while also checking their useful runtime relationships.
+    """
     environment, cargo, _target = rust_tools
     # The separate snapshot includes uncommitted feature work, but excludes all
     # native build products. Cargo's include list determines the shipped files.
@@ -234,8 +296,66 @@ def test_unpacked_crate_builds_and_runs_a_public_rust_consumer(
         + ', version = ' + json.dumps(documented_version.group(1)) + ' }\n',
         encoding='utf-8',
     )
-    # This is the published example, not an internal module import.
-    shutil.copy2(unpacked / 'examples/native/rust.rs', consumer / 'src/main.rs')
+    # Extend the published example with a suite check that does no benchmark work.
+    example = (unpacked / 'examples/native/rust.rs').read_text(encoding='utf-8')
+    suite_check = '''fn inspect_progress(progress: benchset::Progress) {
+    let phase: benchset::Phase = progress.phase;
+    assert!(progress.workers >= 1);
+    assert!((0.0..=1.0).contains(&progress.fraction));
+    assert!(progress.phase_elapsed_seconds >= 0.0);
+    assert!(progress.phase_duration_seconds >= 0.0);
+    println!("Progress {:?}: {}", phase, progress.iterations);
+}
+fn inspect_sample(sample: &benchset::Sample) {
+    assert!(sample.elapsed_seconds >= 0.0 && sample.duration_seconds > 0.0);
+    assert_eq!(sample.iterations_per_second, sample.iterations as f64 / sample.duration_seconds);
+}
+fn main() {
+    assert_eq!(benchset::BENCHMARKS.map(|benchmark| benchmark.name()), ["single_core", "multi_core"]);
+    assert_eq!(Options::default().warmup.as_secs_f64(), benchset::DEFAULT_WARMUP_SECONDS);
+    assert_eq!(Options::default().measurement.as_secs_f64(), benchset::DEFAULT_MEASUREMENT_SECONDS);
+    let cancelled = Cancellation::default();
+    assert!(!cancelled.is_cancelled());
+    cancelled.cancel();
+    assert!(cancelled.clone().is_cancelled());
+    // Public calibration fields must remain accessible outside the crate even
+    // when ffi.rs can still read them through pub(crate) visibility.
+    let machine: &benchset::ReferenceMachine = &benchset::PI_REFERENCE_MACHINE;
+    assert_eq!(machine.cpu_architecture, "aarch64");
+    let reference: &benchset::ReferenceRun = &benchset::PI_REFERENCE_RUN;
+    assert_eq!(reference.started_at_unix_seconds, 1792767590.517391);
+    assert_eq!(reference.start_temperature_c, 41.35);
+    assert_eq!(reference.end_temperature_c, 66.65);
+    let entries: &[benchset::ReferenceBenchmarkResult] = reference.results;
+    assert_eq!(entries.iter().map(|entry| (entry.benchmark, entry.score)).collect::<Vec<_>>(),
+               vec![("single_core", 47231.227029007096), ("multi_core", 181953.17419139884)]);
+    let suite: benchset::SuiteResult = benchset::run_all(
+        Options { warmup: Duration::ZERO, measurement: Duration::ZERO },
+        &Cancellation::default(), |_, _| {},
+    );
+    let results: Vec<benchset::BenchmarkResult> = suite.results;
+    let scores: benchset::AggregatedScores = suite.aggregated_scores;
+    let full_pi: Option<f64> = scores.pi_equivalent;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, Status::Failed);
+    assert!(full_pi.is_none());
+    assert!(benchset::SuiteResult::new(results).aggregated_scores.pi_equivalent.is_none());
+'''
+    assert example.count('fn main() {') == 1
+    diagnostics = '''
+    assert_eq!(result.benchmark, Benchmark::SingleCore);
+    assert_eq!(result.version, benchset::VERSION);
+    assert!(result.workers >= 1);
+    assert_eq!((result.warmup_seconds, result.measurement_seconds), (0.1, 0.2));
+    assert_eq!(result.samples.iter().map(|sample| sample.iterations).sum::<u64>(), result.iterations);
+    for sample in &result.samples { inspect_sample(sample); }
+    if let Some(variation) = result.variation_percent { assert!(variation.is_finite() && variation >= 0.0); }
+    assert!(!result.unstable || result.variation_percent.is_some());
+    println!("Checksum {}", result.checksum);
+'''
+    client = example.replace('fn main() {', suite_check, 1).replace('_| {}', 'progress| inspect_progress(progress)')
+    client = client.replace('    drop(result);', diagnostics + '    drop(result);')
+    (consumer / 'src/main.rs').write_text(client, encoding='utf-8')
     output = execute([cargo, 'run', '--offline', '--quiet'], consumer, environment)
     assert 'Reference: Raspberry Pi 5 Model B Rev 1.0' in output
     if 'status: Completed,' in output:
@@ -291,30 +411,36 @@ def test_documentation_checks_ignore_the_default_file_encoding(monkeypatch: pyte
 
 
 @pytest.mark.parametrize('encoding', ['utf-8', 'ascii', 'cp1251'])
-def test_installed_cli_verifier_accepts_supported_stream_encodings(encoding: str) -> None:
-    from benchset import PI_REFERENCE_RUN, BenchmarkResult, cli  # noqa: PLC0415
+@pytest.mark.parametrize('include_summary', [False, True])
+def test_installed_cli_verifier_accepts_supported_stream_encodings(
+    installed_cli_results: Tuple[benchset.BenchmarkResult, ...], encoding: str, include_summary: bool,
+) -> None:
+    """Accept the whole rendered suite, including its summary, in supported encodings.
 
-    buffer = io.BytesIO()
-    stream = io.TextIOWrapper(buffer, encoding=encoding, newline='\n')
-    for index, reference in enumerate(PI_REFERENCE_RUN.results):
-        if index:
-            stream.write('\n')
-        cli.render(BenchmarkResult(reference.benchmark, status='completed',
-                                   score=reference.score, pi_equivalent=1.0, workers=1,
-                                   warmup_seconds=0, measurement_seconds=0.05), stream)
-    stream.flush()
-    text = buffer.getvalue().decode(encoding)
+    Individual records alone cannot reveal a verifier that misreads a valid
+    aggregate summary as an extra sample row from the installed CLI.
+    """
+    from benchset import SuiteResult  # noqa: PLC0415
+
+    text = '\n'.join(render_installed_cli_result(result, encoding) for result in installed_cli_results)
+    if include_summary:
+        text += render_installed_cli_result(SuiteResult.from_results(installed_cli_results), encoding)
     assert ('\u00d7 pi' if encoding == 'utf-8' else 'x pi') in text
     verify_cli(text)
-    stream.detach()
 
 
-def render_installed_cli_result(result: benchset.BenchmarkResult, encoding: str = 'utf-8') -> str:
-    from benchset import cli  # noqa: PLC0415
+def render_installed_cli_result(
+    result: Union[benchset.BenchmarkResult, benchset.SuiteResult], encoding: str = 'utf-8',
+) -> str:
+    """Render either result form with the real CLI writer and stream encoding."""
+    from benchset import SuiteResult, cli  # noqa: PLC0415
 
     buffer = io.BytesIO()
     stream = io.TextIOWrapper(buffer, encoding=encoding, newline='\n')
-    cli.render(result, stream)
+    if isinstance(result, SuiteResult):
+        cli.render_suite(result, stream)
+    else:
+        cli.render(result, stream)
     stream.flush()
     text = buffer.getvalue().decode(encoding)
     stream.detach()
@@ -333,10 +459,32 @@ def installed_cli_results() -> Tuple[benchset.BenchmarkResult, ...]:
     ) for reference in PI_REFERENCE_RUN.results)
 
 
+@pytest.mark.parametrize('control', ['\r', '\x1b'])
+def test_installed_cli_verifier_rejects_controls_inside_a_suite_summary(
+    installed_cli_results: Tuple[benchset.BenchmarkResult, ...], control: str,
+) -> None:
+    """Reject terminal controls before a summary can hide them from record parsing.
+
+    Each stream has only one kind of control character; accepting it would hide
+    accidental terminal-mode output in an otherwise valid installed CLI run.
+    """
+    from benchset import SuiteResult  # noqa: PLC0415
+
+    summary = render_installed_cli_result(SuiteResult.from_results(installed_cli_results))
+    output = '\n'.join(render_installed_cli_result(result) for result in installed_cli_results)
+    output += summary.replace(' : ', ' : ' + control, 1)
+    with pytest.raises(RuntimeError):
+        verify_cli(output)
+
+
 @pytest.mark.parametrize('completed_count', [0, 1, 2])
 def test_installed_cli_verifier_accepts_windows_line_endings(
     installed_cli_results: Tuple[benchset.BenchmarkResult, ...], completed_count: int,
 ) -> None:
+    """Normalize CRLF in complete success/no-work streams, including the summary."""
+    from benchset import SuiteResult  # noqa: PLC0415
+
+    results = installed_cli_results[:completed_count]
     output = '\n'.join(render_installed_cli_result(result)
                        for result in installed_cli_results[:completed_count])
     errors = ''
@@ -345,6 +493,12 @@ def test_installed_cli_verifier_accepts_windows_line_endings(
                          reason='measurement window was too short to complete any work',
                          score=None, pi_equivalent=None, iterations=0, checksum=0, samples=())
         errors = render_installed_cli_result(failed)
+        results += (failed,)
+    summary = render_installed_cli_result(SuiteResult.from_results(results))
+    if completed_count < 2:
+        errors += summary
+    else:
+        output += summary
     verify_cli(output.replace('\n', '\r\n'), errors.replace('\n', '\r\n'), int(completed_count < 2))
 
 
@@ -354,8 +508,14 @@ def test_installed_cli_verifier_accepts_windows_line_endings(
 def test_installed_cli_verifier_accepts_only_completed_prefix_or_exact_no_work(
     installed_cli_results: Tuple[benchset.BenchmarkResult, ...], encoding: str, completed_count: int, zero_sample: bool,
 ) -> None:
-    from benchset import Sample  # noqa: PLC0415
+    """Accept complete CLI streams for success or an honest stopped no-work suite.
 
+    A failure summary belongs on stderr after the failed record; omitting it
+    from fixtures can hide rejection of valid output on slow or loaded hosts.
+    """
+    from benchset import Sample, SuiteResult  # noqa: PLC0415
+
+    results = installed_cli_results[:completed_count]
     output = '\n'.join(render_installed_cli_result(result, encoding)
                        for result in installed_cli_results[:completed_count])
     errors = ''
@@ -367,6 +527,12 @@ def test_installed_cli_verifier_accepts_only_completed_prefix_or_exact_no_work(
             samples=(Sample(0.05, 0.05, 0, 0),) if zero_sample else (),
         )
         errors = render_installed_cli_result(failed, encoding)
+        results += (failed,)
+    summary = render_installed_cli_result(SuiteResult.from_results(results), encoding)
+    if completed_count < 2:
+        errors += summary
+    else:
+        output += summary
     verify_cli(output, errors, int(completed_count < 2))
 
 
@@ -374,7 +540,8 @@ def test_installed_cli_verifier_accepts_only_completed_prefix_or_exact_no_work(
     'generic failure', 'nonzero iterations', 'present ratio', 'present score',
     'present variation', 'unstable', 'nonzero sample', 'wrong status',
     'wrong order', 'wrong duration', 'wrong warmup', 'extra stderr',
-    'failure exit zero', 'success exit one', 'missing success', 'continued after failure',
+    'failure exit zero', 'failure exit two', 'success exit one', 'success exit minus one',
+    'missing success', 'continued after failure',
 ])
 def test_installed_cli_verifier_rejects_other_failures_and_invalid_stop_behavior(
     installed_cli_results: Tuple[benchset.BenchmarkResult, ...], mutation: str,
@@ -403,14 +570,106 @@ def test_installed_cli_verifier_rejects_other_failures_and_invalid_stop_behavior
         errors += 'unexpected native failure\n'
     elif mutation == 'failure exit zero':
         code = 0
-    elif mutation == 'success exit one':
+    elif mutation == 'failure exit two':
+        code = 2
+    elif mutation in ('success exit one', 'success exit minus one'):
         output, errors = output + '\n' + render_installed_cli_result(second), ''
+        if mutation == 'success exit minus one':
+            code = -1
     elif mutation == 'missing success':
         errors, code = '', 0
     elif mutation == 'continued after failure':
         output += '\n' + render_installed_cli_result(second)
     with pytest.raises(RuntimeError):
         verify_cli(output, errors, code)
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('Reference machine', 'another reference'), ('Unit', 'operations'),
+    ('Workers', '0'), ('Workers', '-1'), ('Workers', 'unknown'),
+    ('Warmup seconds', '0.1'), ('Measurement seconds', '0.06'),
+    ('Status', 'failed'), ('Success', 'False'),
+    ('Pi equivalent', '1 x other'), ('Pi equivalent', '1'),
+    ('Pi equivalent', '0 x pi'), ('Pi equivalent', '-1 x pi'),
+    ('Pi equivalent', 'nan x pi'), ('Pi equivalent', 'inf x pi'),
+    ('Version', None), ('duplicate', None), ('extra', None),
+])
+def test_installed_cli_verifier_rejects_corrupted_completed_result_fields(
+    installed_cli_results: Tuple[benchset.BenchmarkResult, ...], field: str, value: Optional[str],
+) -> None:
+    """Reject plausible CLI regressions before declaring an installed build healthy.
+
+    Correct stop behavior is insufficient when a completed record loses fields,
+    duplicates a key, changes its reference/unit, or emits a nonpositive/nonfinite
+    multiplier. Only the selected field changes so another error cannot mask it.
+    """
+    first, second = installed_cli_results
+    section = render_installed_cli_result(first)
+    if field == 'duplicate':
+        section = section.replace('Samples:\n', 'Version : duplicate\nSamples:\n')
+    elif field == 'extra':
+        section = section.replace('Samples:\n', 'Unexpected : value\nSamples:\n')
+    else:
+        pattern = r'^\s*' + re.escape(field) + r'\s+ : .*\n'
+        section, count = re.subn(pattern, '' if value is None else field + ' : ' + value + '\n',
+                                section, count=1, flags=re.MULTILINE)
+        assert count == 1
+    with pytest.raises(RuntimeError):
+        verify_cli(section + '\n' + render_installed_cli_result(second))
+
+
+@pytest.mark.parametrize(('elapsed', 'duration', 'iterations', 'rate'), [
+    (-1, 1, 0, 0), (0, 0, 0, 0), (0, -1, 0, 0),
+    (0, 1, -1, 0), (0, 1, 0, -1), (0, 1, 0, 1),
+    (float('nan'), 1, 0, 0), (0, float('nan'), 0, 0),
+    (0, 1, 0, float('nan')), (0, 1, 0, float('inf')),
+])
+@pytest.mark.parametrize('damaged_index', [0, 1, 2])
+def test_installed_cli_verifier_requires_zero_work_samples_with_valid_time_windows(  # noqa: PLR0913 — Independent components and history positions.
+    installed_cli_results: Tuple[benchset.BenchmarkResult, ...],
+    elapsed: float, duration: float, iterations: int, rate: float, damaged_index: int,
+) -> None:
+    """Allow an honest short-window failure without accepting malformed sample data.
+
+    Each case changes one sample component, protecting the time/rate conditions
+    individually rather than rejecting only a row whose every value is wrong.
+    Put that row at every position so checking only the last sample cannot hide
+    malformed earlier history behind a valid final sample.
+    """
+    from benchset import Sample  # noqa: PLC0415
+
+    first, second = installed_cli_results
+    samples = [Sample(0.01, 0.01, 0, 0), Sample(0.02, 0.01, 0, 0), Sample(0.05, 0.03, 0, 0)]
+    samples[damaged_index] = Sample(elapsed, duration, iterations, rate)
+    failed = replace(second, status='failed', reason='measurement window was too short to complete any work',
+                     score=None, pi_equivalent=None, iterations=0, checksum=0, samples=tuple(samples))
+    with pytest.raises(RuntimeError):
+        verify_cli(render_installed_cli_result(first), render_installed_cli_result(failed), 1)
+
+
+@pytest.mark.parametrize('damage', ['wrong header', 'missing rows'])
+def test_installed_cli_verifier_requires_a_recognizable_nonempty_sample_table(
+    installed_cli_results: Tuple[benchset.BenchmarkResult, ...], damage: str,
+) -> None:
+    """Require both a known table header and data rows for a reported no-work sample.
+
+    Start with a valid failure record and change only its table structure so
+    invalid numeric values cannot mask either missing structural requirement.
+    """
+    from benchset import Sample  # noqa: PLC0415
+
+    first, second = installed_cli_results
+    failed = replace(second, status='failed', reason='measurement window was too short to complete any work',
+                     score=None, pi_equivalent=None, iterations=0, checksum=0,
+                     samples=(Sample(0.05, 0.05, 0, 0),))
+    prefix, samples = render_installed_cli_result(failed).split('Samples:\n', 1)
+    rows = samples.splitlines()
+    if damage == 'wrong header':
+        rows[0] = 'unrecognized | sample | table | header'
+    else:
+        rows = rows[:1]
+    with pytest.raises(RuntimeError):
+        verify_cli(render_installed_cli_result(first), prefix + 'Samples:\n' + '\n'.join(rows) + '\n', 1)
 
 
 @pytest.mark.parametrize('failure', ['no work', 'generic failure', 'nonzero work'])
@@ -609,6 +868,12 @@ def test_macos_native_zip_has_relocatable_install_name_and_valid_signature(
 def test_unpacked_native_zip_links_its_public_header_and_library(
     native_bundle: Path, tmp_path: Path,
 ) -> None:
+    """Run native consumers and verify the C example reports real progress and Pi units.
+
+    Linking alone cannot detect a correct callback/result displayed with the
+    wrong percentage or ratio. The comparison permits the example's deliberate
+    decimal rounding, and honest no-work runs retain their exact failure reason.
+    """
     from tests.test_reference_native import compile_and_run_consumer  # noqa: PLC0415
 
     extra: Tuple[str, ...]
@@ -645,12 +910,31 @@ def test_unpacked_native_zip_links_its_public_header_and_library(
             except AssertionError as error:
                 raise AssertionError(label + ': ' + str(error)) from error
             assert message in result.stdout, label + ': ' + result.stdout
+            if source == 'examples/native/c.c':
+                frames = re.findall(r'^phase=(\d+) progress=([\d.]+)%$', result.stdout, re.MULTILINE)
+                assert frames
+                assert all(0 <= float(percent) <= 100 for _phase, percent in frames)
+                assert int(frames[-1][0]) == (3 if result.returncode == 0 else 5)
+                if result.returncode == 0:
+                    assert float(frames[-1][1]) == 100
+                    record = re.search(r'benchset \S+: ([\d.eE+-]+) iterations/s, ([\d.eE+-]+) x pi', result.stdout)
+                    assert record is not None
+                    score, equivalent = map(float, record.groups())
+                    assert score > 0
+                    assert equivalent > 0
+                    assert math.isclose(equivalent, score / 47231.227029007096,
+                                        rel_tol=5e-6, abs_tol=0.000501 / 47231.227029007096)
 
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='XCFramework and Swift package target macOS')
-def test_unpacked_swift_package_public_consumer_and_both_xcframework_slices(
+def test_unpacked_swift_package_public_consumer_and_both_xcframework_slices(  # noqa: PLR0915 - one complete offline package and public consumer
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Exercise shipped Swift types without @testable and inspect both native slices.
+
+    Explicit types and realistic progress/sample diagnostics catch accidental
+    loss of public visibility, which privileged Swift unit imports cannot detect.
+    """
     archive = ROOT / 'release-artifacts/Benchset-Swift.zip'
     if not archive.is_file():
         pytest.skip('Build the offline Swift ZIP with package_native.py --apple first')
@@ -706,6 +990,15 @@ precondition(describeLegacyError(.alreadyRunning) == "busy")
 precondition(describeLegacyError(.allocationFailed) == "allocation")
 precondition(describeLegacyError(.resultUnavailable) == "result")
 
+// Invalid timing exercises the public suite surface without doing benchmark work.
+let suite: SuiteResult = try BenchmarkRunner().runAll(warmupSeconds: -1, measurementSeconds: 0.05)
+let suiteResults: [BenchmarkResult] = suite.results
+let suiteScores: AggregatedScores = suite.aggregatedScores
+let suiteEquivalent: Double? = suiteScores.piEquivalent
+precondition(suiteResults.count == 1 && suiteResults[0].benchmark == .singleCore)
+precondition(!suiteResults[0].success && suiteEquivalent == nil)
+precondition(SuiteResult(results: suiteResults).aggregatedScores.piEquivalent == nil)
+
 // Neither run() nor a validation failure needs to initialize the lazy Swift
 // metadata globals. First access happens concurrently inside a live callback.
 let coldRunner = BenchmarkRunner()
@@ -713,6 +1006,10 @@ let coldFailure = try coldRunner.run(.singleCore, warmupSeconds: -1, measurement
 precondition(!coldFailure.success)
 var observedReference = false
 let coldCancelled = try coldRunner.run(.singleCore, warmupSeconds: 10, measurementSeconds: 1) { progress in
+    precondition(progress.workers >= 1 && (0...1).contains(progress.fraction))
+    precondition(progress.phaseElapsedSeconds >= 0)
+    precondition(progress.phaseDurationSeconds == (progress.phase == 1 ? 10 : 1))
+    print("Progress", progress.iterations)
     if progress.phase == 1 || progress.phase == 2 {
         observedReference = true
         DispatchQueue.concurrentPerform(iterations: 8) { _ in
@@ -725,6 +1022,7 @@ let coldCancelled = try coldRunner.run(.singleCore, warmupSeconds: 10, measureme
 }
 precondition(observedReference && coldCancelled.status == 1)
 ''' + example + '''
+print("Example outcome", result.status)
 let typedMachine: ReferenceMachine = machine
 let typedReference: ReferenceRun = reference
 precondition(machine.name == "Raspberry Pi 5 Model B Rev 1.0")
@@ -732,13 +1030,25 @@ precondition(machine.shortName == "pi")
 precondition(machine.osName == "Ubuntu Server" && machine.osVersion == "26.04 LTS")
 precondition(machine.cpuArchitecture == "aarch64")
 precondition(machine.memoryBytes == UInt64(8589934592) && machine.cpuCores == 4)
+precondition(piReferenceMachine.name == machine.name)
 precondition(reference.startedAtUnixSeconds == 1792767590.517391)
 precondition(reference.startedAt.timeIntervalSince1970 == reference.startedAtUnixSeconds)
 precondition(reference.startTemperatureC == 41.35 && reference.endTemperatureC == 66.65)
 precondition(reference.warmupSeconds == 1248)
 let scores = Dictionary(uniqueKeysWithValues: reference.results.map { ($0.benchmark, $0.score) })
 precondition(scores == ["single_core": 47231.227029007096, "multi_core": 181953.17419139884])
-func expectMeasurementOutcome(_ result: BenchmarkResult, benchmarkName: String) {
+func expectMeasurementOutcome(_ result: BenchmarkResult, benchmarkName: String,
+                              warmup: Double, measurement: Double) {
+    precondition(result.workers >= 1 && result.elapsedSeconds >= 0)
+    precondition(result.warmupSeconds == warmup && result.measurementSeconds == measurement)
+    precondition(result.samples.reduce(UInt64(0)) { $0 + $1.iterations } == result.iterations)
+    for sample in result.samples {
+        precondition(sample.elapsedSeconds >= 0 && sample.durationSeconds > 0)
+        precondition(sample.iterationsPerSecond == Double(sample.iterations) / sample.durationSeconds)
+    }
+    if let variation = result.variationPercent { precondition(variation.isFinite && variation >= 0) }
+    precondition(!result.unstable || result.variationPercent != nil)
+    print("Diagnostics", result.checksum, result.samples.count)
     if result.success {
         precondition(result.score != nil && result.piEquivalent != nil)
         precondition(result.score! > 0)
@@ -750,7 +1060,7 @@ func expectMeasurementOutcome(_ result: BenchmarkResult, benchmarkName: String) 
         precondition(result.score == nil && result.piEquivalent == nil)
     }
 }
-expectMeasurementOutcome(result, benchmarkName: "single_core")
+expectMeasurementOutcome(result, benchmarkName: "single_core", warmup: 0.1, measurement: 0.2)
 for (benchmark, name) in [(Benchmark.singleCore, "single_core"), (.multiCore, "multi_core")] {
     let result = try BenchmarkRunner().run(benchmark, warmupSeconds: 0, measurementSeconds: 0.05)
     let resultMachine: ReferenceMachine = result.referenceMachine
@@ -761,7 +1071,7 @@ for (benchmark, name) in [(Benchmark.singleCore, "single_core"), (.multiCore, "m
     precondition(resultReference.warmupSeconds == reference.warmupSeconds)
     let resultScores = Dictionary(uniqueKeysWithValues: resultReference.results.map { ($0.benchmark, $0.score) })
     precondition(resultScores == scores)
-    expectMeasurementOutcome(result, benchmarkName: name)
+    expectMeasurementOutcome(result, benchmarkName: name, warmup: 0, measurement: 0.05)
 }
 var copiedResults = result.referenceRun.results
 copiedResults.removeAll()
@@ -772,6 +1082,16 @@ print("Public Swift pi consumer verified")
     # No test-only macOS 13 target override: exercise the shipped deployment target.
     output = execute(['swift', 'run', 'Consumer'], consumer, environment)
     assert 'Public Swift pi consumer verified' in output
+    assert 'Reference: Raspberry Pi 5 Model B Rev 1.0 (pi)' in output
+    if 'Example outcome 0\n' in output:
+        record = re.search(r'benchset \S+: ([\d.eE+-]+) iterations/s, ([\d.eE+-]+) x pi', output)
+        assert record is not None
+        score, equivalent = map(float, record.groups())
+        assert score > 0
+        assert math.isclose(equivalent, score / 47231.227029007096, rel_tol=1e-12)
+    else:
+        assert 'Example outcome 2\n' in output
+        assert 'measurement window was too short to complete any work' in output
     try:
         with monkeypatch.context() as scoped:
             # Swift emits the Unicode source path as UTF-8 even with an ASCII parent locale.

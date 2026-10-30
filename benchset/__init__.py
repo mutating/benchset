@@ -9,9 +9,11 @@ from benchset.models import (
     BENCHMARKS as BENCHMARKS,
     DEFAULT_MEASUREMENT_SECONDS as DEFAULT_MEASUREMENT_SECONDS,
     DEFAULT_WARMUP_SECONDS as DEFAULT_WARMUP_SECONDS,
+    AggregatedScores as AggregatedScores,
     BenchmarkResult as BenchmarkResult,
     Progress as Progress,
     Sample as Sample,
+    SuiteResult as SuiteResult,
     __version__ as __version__,
 )
 from benchset.reference import (

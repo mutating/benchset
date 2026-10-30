@@ -99,6 +99,7 @@ def test_bootstrap_uses_private_pinned_environment_and_reuses_cache(
         assert env['PATH'].split(os.pathsep)[0] == str(cache / '1.94.1' / target / 'cargo/bin')
         calls.append(command)
         if '--no-modify-path' in command:
+            assert '-y' in command
             assert command[command.index('--default-toolchain') + 1] == '1.94.1'
             assert command[command.index('--default-host') + 1] == target
             assert command[command.index('--profile') + 1] == 'minimal'
@@ -153,17 +154,36 @@ def test_install_failure_cleans_temporary_files_and_can_retry(monkeypatch: pytes
     backend.rust_environment(root, TARGET)
 
 
-def test_installer_success_without_tools_is_not_cached(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize('created_tool', [None, 0, 1])
+def test_installer_success_without_tools_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, created_tool: int | None,
+) -> None:
+    """Reject success exit codes when either Cargo or rustc is still absent.
+
+    Partial bootstrap must not become a usable cache merely because the other
+    executable exists; otherwise a later source build fails far from its cause.
+    """
     root, cache = project(tmp_path), tmp_path / 'cache'
     no_cargo(monkeypatch, cache)
     monkeypatch.setattr(backend, 'download_installer', lambda _target, path: path.write_bytes(b'installer'))
-    monkeypatch.setattr(backend.subprocess, 'run', lambda *args, **_kwargs: subprocess.CompletedProcess(args[0], 0))
+    def run(arguments: List[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if created_tool is not None:
+            path = cached_tools(cache)[created_tool]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        return subprocess.CompletedProcess(arguments, 0)
+    monkeypatch.setattr(backend.subprocess, 'run', run)
     with pytest.raises(RuntimeError, match='did not create'):
         backend.rust_environment(root, TARGET)
 
 
 @pytest.mark.parametrize('target', [TARGET, 'x86_64-pc-windows-msvc'])
 def test_download_verifies_checksum_before_executable_permissions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str) -> None:
+    """Fetch the matching binary and checksum from the Rust distribution endpoint before chmod.
+
+    Both target selection and the HTTPS base URL matter; a fake transport must
+    not conceal a relative URL or a checksum fetched for another installer.
+    """
     content = b'installer binary' * 100
     checksum = hashlib.sha256(content).hexdigest().encode()
     urls: List[str] = []
@@ -178,12 +198,20 @@ def test_download_verifies_checksum_before_executable_permissions(monkeypatch: p
     assert path.read_bytes() == content
     assert urls[0] == urls[1] + '.sha256'
     assert urls[1].endswith('rustup-init.exe' if target.endswith('windows-msvc') else 'rustup-init')
+    installer = 'rustup-init.exe' if target.endswith('windows-msvc') else 'rustup-init'
+    expected = 'https://static.rust-lang.org/rustup/dist/' + target + '/' + installer
+    assert urls == [expected + '.sha256', expected]
     if os.name != 'nt':
         assert path.stat().st_mode & 0o777 == 0o700
 
 
-@pytest.mark.parametrize('checksum', [b'', b'not a hash', b'0' * 64])
+@pytest.mark.parametrize('checksum', [b'', b'not a hash', b'0' * 64, b'f' * 64])
 def test_bad_download_cannot_be_executed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, checksum: bytes) -> None:
+    """Reject malformed digests and mismatches on either side of the actual hash.
+
+    Hashes have equality semantics; an accidental ordering comparison must not
+    authorize an unverified installer or grant it executable permissions.
+    """
     monkeypatch.setattr(backend, 'urlopen', lambda url, **_kwargs: io.BytesIO(checksum if url.endswith('.sha256') else b'untrusted'))
     path = tmp_path / 'installer'
     with pytest.raises(RuntimeError, match='checksum'):

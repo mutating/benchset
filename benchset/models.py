@@ -1,5 +1,6 @@
 """Public, immutable measurement objects."""
 
+import math
 from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Optional, Tuple
@@ -68,3 +69,35 @@ class BenchmarkResult:
     @property
     def success(self) -> bool:
         return self.status == 'completed'
+
+
+@dataclass(frozen=True)
+class AggregatedScores:
+    """Full-suite scores; Pi equivalent is the geometric mean of all ratios."""
+
+    pi_equivalent: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SuiteResult:
+    results: Tuple[BenchmarkResult, ...]
+    aggregated_scores: AggregatedScores
+
+    @classmethod
+    def from_results(cls, results: Tuple[BenchmarkResult, ...]) -> 'SuiteResult':
+        complete = (
+            tuple(result.benchmark for result in results) == BENCHMARKS
+            and all(
+                result.success and result.pi_equivalent is not None
+                and math.isfinite(result.pi_equivalent) and result.pi_equivalent >= 0
+                for result in results
+            )
+        )
+        equivalent: Optional[float] = None
+        if complete:
+            equivalent = (
+                0.0 if any(result.pi_equivalent == 0 for result in results)
+                else math.exp(sum(math.log(result.pi_equivalent) for result in results
+                                  if result.pi_equivalent is not None) / len(results))
+            )
+        return cls(results, AggregatedScores(pi_equivalent=equivalent))

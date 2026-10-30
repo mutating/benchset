@@ -91,6 +91,12 @@ else:
 def test_sigint_defers_through_handle_lifetime_and_restores_runner(
     monkeypatch: pytest.MonkeyPatch, stage: str,
 ) -> None:
+    """Deliver SIGINT to native cancellation while deferring the exception until cleanup.
+
+    Merely raising KeyboardInterrupt after a normal-length run is insufficient:
+    a live or subsequently allocated handle must actually receive cancellation.
+    Cleanup-stage signals must never touch the handle being freed.
+    """
     backend = ManagedNative()
     original_create, original_free = backend.create, backend.free
     armed = True
@@ -140,6 +146,7 @@ def test_sigint_defers_through_handle_lifetime_and_restores_runner(
         assert runner._handle is None
         assert runner._native is None
         assert not runner._active
+        assert ('cancel' in backend.calls) == (stage in ('loading', 'allocation', 'execute'))
         assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     finally:
         armed = False
