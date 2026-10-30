@@ -139,21 +139,24 @@ def test_actual_suite_aggregate() -> None:
 
 @pytest.mark.parametrize('encoding', ['ascii', 'utf-8'])
 @pytest.mark.parametrize(('single', 'expected'), [(None, '—'), (0.0, '0 \u00d7 pi'), (0.5, '1 \u00d7 pi')])
-def test_cli_summary_encoding(encoding: str, single: Optional[float], expected: str) -> None:
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+def test_cli_summary_encoding(encoding: str, single: Optional[float], expected: str, newline: str) -> None:
     """Render missing, zero and positive aggregates with both stream encodings.
 
     A valid zero must not disappear through a truthiness-based absence check.
+    Explicit LF and CRLF translation keeps byte checks portable without losing
+    the required final newline or concealing duplicate carriage returns.
     """
     results = (completed('single_core', single), completed('multi_core', 2)) if single is not None else ()
     buffer = io.BytesIO()
-    stream = io.TextIOWrapper(buffer, encoding=encoding)
+    stream = io.TextIOWrapper(buffer, encoding=encoding, newline=newline)
     cli.render_suite(SuiteResult.from_results(results), stream)
     stream.flush()
     text = buffer.getvalue().decode(encoding)
     stream.detach()
     if encoding == 'ascii':
         expected = expected.replace('—', '-').replace('\u00d7', 'x')
-    assert text == 'Full Pi equivalent : ' + expected + '\n'
+    assert text == 'Full Pi equivalent : ' + expected + newline
 
 
 def test_interrupted_completed_cli_suite_has_no_aggregate(

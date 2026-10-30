@@ -95,6 +95,7 @@ def test_rust_coverage_runs_only_the_fresh_instrumented_library_executable(  # n
 
     Build failures and ambiguous executables must abort before any old test
     binary can be run or its counters accepted as current coverage.
+    Match the complete profile path using the host's path separators.
     """
     explicit_tools, windows = configuration
     suffix = '.exe' if windows else ''
@@ -144,7 +145,7 @@ def test_rust_coverage_runs_only_the_fresh_instrumented_library_executable(  # n
         assert kwargs['check'] is True
         if arguments[0] == executable:
             assert arguments[1:] == ['--test-threads=1']
-            assert kwargs['env']['LLVM_PROFILE_FILE'].endswith('/%p-%m.profraw')
+            assert kwargs['env']['LLVM_PROFILE_FILE'] == str(tmp_path / '%p-%m.profraw')
             (tmp_path / 'fresh.profraw').touch()
         else:
             assert arguments[0] == str(llvm / ('llvm-profdata' + suffix))
