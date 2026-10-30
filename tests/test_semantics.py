@@ -124,10 +124,13 @@ def test_callback_base_exceptions_stop_notifications_and_allow_reuse(
     caller = get_ident()
     error = error_type('callback boundary')
     if formatting_error is not None:
-        class Unprintable(error_type):
-            def __str__(self) -> str:
-                raise formatting_error('formatter failed')
-        error = Unprintable()
+        formatter_failure = formatting_error
+
+        def unprintable(_error: BaseException) -> str:
+            raise formatter_failure('formatter failed')
+
+        unprintable_type: Type[BaseException] = type('Unprintable', (error_type,), {'__str__': unprintable})
+        error = unprintable_type()
 
     def callback(progress: Progress) -> None:
         assert get_ident() == caller
