@@ -73,7 +73,7 @@ def test_registered_installer_follows_directory_links_and_reports_every_file(
     raw = str(output) if spelling == 'plain' else str(tmp_path) + '/./installed'
     command = _command(installer_setup, source, raw)
     returned = command.install()
-    assert {os.path.relpath(path, raw) for path in returned} == set(contents)
+    assert {Path(os.path.relpath(path, raw)).as_posix() for path in returned} == set(contents)
     for name, data in contents.items():
         installed = output / name
         assert installed.is_file()
@@ -132,7 +132,7 @@ def test_registered_installer_dry_run_reports_outputs_without_writing(
     command = _command(installer_setup, source, str(output))
     command.dry_run, command.force = True, force
     returned = command.install()
-    assert {os.path.relpath(path, output) for path in returned} == set(contents)
+    assert {Path(os.path.relpath(path, output)).as_posix() for path in returned} == set(contents)
     assert output.exists() is existing
     assert sorted(str(path.relative_to(output)) for path in output.rglob('*')) == before
     if existing:
@@ -157,8 +157,8 @@ def test_registered_installer_skips_nfs_tombstones_at_every_depth(
     contents['benchset/.keep'] = normal.read_bytes()
     output = tmp_path / 'installed'
     returned = _command(installer_setup, source, str(output)).install()
-    assert {os.path.relpath(path, output) for path in returned} == set(contents)
-    assert {str(path.relative_to(output)) for path in output.rglob('*') if path.is_file()} == set(contents)
+    assert {Path(os.path.relpath(path, output)).as_posix() for path in returned} == set(contents)
+    assert {path.relative_to(output).as_posix() for path in output.rglob('*') if path.is_file()} == set(contents)
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX file and directory permission semantics')
@@ -349,7 +349,7 @@ def test_registered_installer_excludes_publication_locks_without_touching_live_i
         monkeypatch.setattr(command, 'copy_file', observe)
         returned = command.install()
         assert states() == before
-        assert {os.path.relpath(path, raw) for path in returned} == set(contents)
+        assert {Path(os.path.relpath(path, raw)).as_posix() for path in returned} == set(contents)
         for name, data in contents.items():
             assert (output / name).read_bytes() == data
 

@@ -543,7 +543,7 @@ def test_native_platform_library_selection(monkeypatch: pytest.MonkeyPatch, plat
     library = Native().lib
     paths: List[str] = []
 
-    def load(path: str) -> ctypes.CDLL:
+    def load(path: str) -> Any:
         paths.append(path)
         return library
     monkeypatch.setattr(sys, 'platform', platform)

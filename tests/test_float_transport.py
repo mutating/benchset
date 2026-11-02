@@ -3,7 +3,7 @@
 import ctypes
 import subprocess
 import sys
-from typing import Any, List, Type
+from typing import Any, List, Type, cast
 
 import pytest
 
@@ -92,7 +92,7 @@ def test_non_numeric_strings_are_not_accepted_by_the_copy_primitive(position: in
     """Numeric-looking strings keep PyFloat_AsDouble's TypeError, not float(str)."""
     value = '4'
     with pytest.raises(TypeError) as expected:
-        ctypes.c_double(value)
+        ctypes.c_double(cast(Any, value))
     ratios: List[Any] = [1.0, 1.0]
     ratios[position] = value
     results = tuple(BenchmarkResult(name, status='completed', pi_equivalent=ratio)

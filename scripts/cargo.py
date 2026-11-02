@@ -11,7 +11,7 @@ from errno import EACCES
 from pathlib import Path
 from threading import current_thread, main_thread
 from time import sleep
-from typing import Iterator, Mapping, Optional
+from typing import Any, Iterator, Mapping, Optional, cast
 
 
 def target_directory(root: Path, environment: Optional[Mapping[str, str]] = None) -> Path:
@@ -39,10 +39,11 @@ def _package_lock(path: Path) -> Iterator[None]:
         if os.name == 'nt':
             import msvcrt  # noqa: PLC0415 — Platform-specific standard library.
 
+            windows = cast(Any, msvcrt)
             while True:
                 lock.seek(0)
                 try:
-                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    windows.locking(lock.fileno(), windows.LK_NBLCK, 1)
                     break
                 except OSError as error:
                     if error.errno != EACCES:

@@ -37,10 +37,10 @@ class _Library(_CDLL):
 
 
 @lru_cache(maxsize=1)
-def _load_library(path: str) -> Any:
+def _load_library(path: str) -> _CDLL:
     """Open before constructing ctypes types, rolling back handles that cannot be adopted."""
     if _AsDouble is None:
-        return cast(Any, ctypes.cdll)._dlltype(path)
+        return cast(_CDLL, cast(Any, ctypes.cdll)._dlltype(path))
     mode = ctypes.DEFAULT_MODE
     if sys.platform == 'win32':
         path = abspath(path)  # noqa: PTH100 — Match CDLL without resolving symlinks.
@@ -48,7 +48,7 @@ def _load_library(path: str) -> Any:
     handle = cast(Any, ctypes)._dlopen(path, mode)
     try:
         factory = cast(Any, ctypes.cdll)._dlltype
-        return (_Library if factory is _CDLL else factory)(path, handle=handle)
+        return cast(_CDLL, (_Library if factory is _CDLL else factory)(path, handle=handle))
     except BaseException:
         if sys.platform == 'win32':
             _ctypes.FreeLibrary(handle)

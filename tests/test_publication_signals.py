@@ -246,7 +246,7 @@ def test_waiting_for_another_publisher_remains_cancellable() -> None:
     fallback to expose a swallowed interruption without hanging the test runner.
     This also verifies interoperability with the previous locking backend.
     """
-    code = '''import os, signal, tempfile
+    code = '''import os, signal, tempfile, _thread
 from pathlib import Path
 from threading import Event, Thread, Timer
 from filelock import FileLock
@@ -266,7 +266,7 @@ with tempfile.TemporaryDirectory() as temporary:
         owner.release()
     worker = Thread(target=release)
     worker.start()
-    timer = Timer(.1, lambda: os.kill(os.getpid(), signal.SIGINT))
+    timer = Timer(.1, lambda: _thread.interrupt_main() if os.name == 'nt' else os.kill(os.getpid(), signal.SIGINT))
     timer.start()
     caught = False
     try:

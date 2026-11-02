@@ -74,9 +74,9 @@ if len(sys.argv) > 2:
 
 @pytest.mark.skipif(os.name == 'nt', reason='Windows filenames cannot contain line breaks')
 @pytest.mark.skipif(shutil.which('cargo') is None, reason='Cargo checks metadata path transport')
-@pytest.mark.parametrize('separator', ['\n', '\r', '\r\n', '\udcff'])
+@pytest.mark.parametrize('separator', ['\n', '\r', '\r\n'])
 def test_cargo_metadata_preserves_target_path_bytes(tmp_path: Path, separator: str) -> None:
-    """Cargo's line protocol must preserve control characters and non-UTF8 path bytes.
+    """Cargo's line protocol must preserve control characters in output paths.
 
     Real Cargo output catches truncation before Python receives the JSON event;
     a mocked event would conceal corruption inside the build-script protocol.
@@ -84,15 +84,40 @@ def test_cargo_metadata_preserves_target_path_bytes(tmp_path: Path, separator: s
     cargo = shutil.which('cargo')
     assert cargo is not None
     target = tmp_path / ('target' + separator + 'π')
+    target.mkdir()
+    environment = dict(os.environ, CARGO_TARGET_DIR=str(target))
+    metadata = json.loads(build(ROOT, [cargo, 'check', '--locked'], environment))
+    assert metadata == json.loads((ROOT / 'benchset/_metadata.json').read_text(encoding='utf-8'))
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX output path byte semantics')
+@pytest.mark.skipif(shutil.which('rustc') is None, reason='Rust compiler checks the real metadata exporter')
+@pytest.mark.parametrize('separator', ['\n', '\r', '\r\n', '\udcff'])
+def test_metadata_exporter_preserves_output_path_bytes(tmp_path: Path, separator: str) -> None:
+    """The Rust exporter transports exact OS bytes without Cargo-line truncation.
+
+    Compile at a UTF-8 path before providing OUT_DIR at runtime: rustc parses
+    its command-line arguments as UTF-8 and panics on non-UTF8 target paths.
+    The exporter itself must preserve those bytes wherever the filesystem
+    supports them. Real Cargo integration above separately checks its events.
+    """
+    compiler = shutil.which('rustc')
+    assert compiler is not None
+    executable = tmp_path / 'exporter'
+    subprocess.run([compiler, '--edition=2021', str(ROOT / 'native/build.rs'), '-o', str(executable)], check=True)
+    destination = tmp_path / ('output' + separator + 'π')
     try:
-        target.mkdir()
+        destination.mkdir()
     except OSError as error:
         if separator == '\udcff' and error.errno == errno.EILSEQ:
             pytest.skip('This filesystem rejects non-UTF8 filenames')
         raise
-    environment = dict(os.environ, CARGO_TARGET_DIR=str(target))
-    metadata = json.loads(build(ROOT, [cargo, 'check', '--locked'], environment))
-    assert metadata == json.loads((ROOT / 'benchset/_metadata.json').read_text(encoding='utf-8'))
+    result = subprocess.run([str(executable)], env=dict(os.environ, OUT_DIR=str(destination)),
+                            capture_output=True, text=True, check=True)
+    prefix = 'cargo:rustc-env=BENCHSET_METADATA_PATH_HEX='
+    paths = [os.fsdecode(bytes.fromhex(line[len(prefix):])) for line in result.stdout.splitlines() if line.startswith(prefix)]
+    assert paths == [str(destination / 'benchset-metadata.json')]
+    assert json.loads(Path(paths[0]).read_bytes()) == json.loads((ROOT / 'benchset/_metadata.json').read_bytes())
 
 
 @pytest.mark.parametrize('handler', ['thread', 'custom', 'ignored'])
