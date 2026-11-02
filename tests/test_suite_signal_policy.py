@@ -43,6 +43,8 @@ def test_suite_rechecks_signal_policy_after_each_childs_conversions(  # noqa: PL
     child. Custom and ignored policies retain their exact handler objects;
     default SIGINT cancels and escapes as KeyboardInterrupt, never as a failed
     progress callback. A fresh call on the same runner checks complete cleanup.
+    The measurement window allows worker startup on loaded Windows runners;
+    this test checks signal policy rather than short-window throughput.
     """
     events: List[str] = []
     observed: Dict[str, _Handler] = {}
@@ -62,7 +64,7 @@ def test_suite_rechecks_signal_policy_after_each_childs_conversions(  # noqa: PL
 
     class Seconds(float):
         def __new__(cls, field: str) -> 'Seconds':
-            return super().__new__(cls, 0.0 if field == 'warmup' else .01)
+            return super().__new__(cls, 0.0 if field == 'warmup' else .1)
 
         def __init__(self, field: str) -> None:
             self.field = field
