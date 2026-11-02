@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "benchset"
-version = "0.0.6"
+version = "0.0.7"
 authors = [
   { name="Evgeniy Blinov", email="zheni-b@yandex.ru" },
 ]
@@ -42,13 +42,13 @@ keywords = [
 ]
 
 [tool.setuptools.package-data]
-"benchset" = ["py.typed"]
+"benchset" = ["py.typed", "_metadata.json"]
 
 [project.scripts]
 benchset = "benchset.cli:main"
 
 [[tool.mypy.overrides]]
-module = ["benchset._native", "benchset.cli"]
+module = ["benchset._native", "benchset._aggregate", "benchset.cli"]
 disallow_any_expr = false
 disallow_any_explicit = false
 disallow_any_unimported = false

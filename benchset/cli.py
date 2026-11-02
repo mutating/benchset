@@ -1,18 +1,19 @@
 """CLI settings are read by skelet, without environment/config sources."""
 
 import argparse
-import math
 import os
 import re
 import shutil
 import signal
 import sys
-from threading import Event, Thread, current_thread, main_thread
+from queue import Empty, Queue
+from threading import Event, Event as ResultEvent, Thread, current_thread, main_thread
 from types import FrameType
-from typing import Dict, List, NoReturn, Optional, TextIO
+from typing import Dict, List, NoReturn, Optional, TextIO, Tuple
 
 from skelet import Field, FixedCLISource, Storage
 
+from benchset._native import Native, _raise_original
 from benchset.api import BenchmarkRunner
 from benchset.models import (
     BENCHMARKS,
@@ -54,7 +55,7 @@ class _Parser(argparse.ArgumentParser):
         super().error(message)
 
 
-def settings(argv: List[str]) -> Settings:
+def _settings(argv: List[str]) -> Tuple[Settings, argparse.ArgumentParser]:
     source = _Arguments(named_arguments=[])
     source.parser = _Parser(
         prog='benchset', argument_default=argparse.SUPPRESS,
@@ -84,11 +85,22 @@ def settings(argv: List[str]) -> Settings:
     # Bind parsed arguments locally: FixedCLISource's normal getter reparses
     # global sys.argv and temporarily redirects the process's stderr.
     source._arguments = vars(source.parser.parse_args(argv))
-    result = Settings(_sources=[source])
-    if not math.isfinite(result.warmup) or result.warmup < 0:
-        source.parser.error('--warmup must be finite and nonnegative')
-    if not math.isfinite(result.duration) or result.duration <= 0:
-        source.parser.error('--duration must be finite and positive')
+    return Settings(_sources=[source]), source.parser
+
+
+def _duration_error(config: Settings, native: Optional[Native] = None) -> Optional[str]:
+    try:
+        return (Native() if native is None else native).duration_error(config.warmup, config.duration)
+    except Exception:  # noqa: BLE001 — Let the worker preserve the CLI failure boundary.
+        # Execution reports loader errors as ordinary failed results.
+        return None
+
+
+def settings(argv: List[str]) -> Settings:
+    result, parser = _settings(argv)
+    reason = _duration_error(result)
+    if reason is not None:
+        parser.error(reason)
     return result
 
 
@@ -154,6 +166,10 @@ def _write(stream: TextIO, text: str) -> None:
 
 class _Progress:
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Capture the current child's output policy without retaining prior frames."""
         self.width = 0
         # A disconnected PTY can stop reporting itself as a terminal. Keep
         # writing progress so the I/O error cancels the native run promptly.
@@ -207,77 +223,188 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 130
 
 
-def _execute_benchmark(  # noqa: PLR0913 — explicit state passed to the worker thread.
-    runner: BenchmarkRunner, name: str, config: Settings, progress: _Progress,
-    results: List[BenchmarkResult], done: Event,
-) -> None:
+def _main(argv: Optional[List[str]]) -> int:  # noqa: PLR0915 — Keep signal/worker ownership and cleanup together.
     try:
-        results.append(runner.run(
-            name, warmup_seconds=config.warmup, measurement_seconds=config.duration,
-            on_progress=progress,
-        ))
-    except Exception as error:  # noqa: BLE001 — return background failures to the console.
-        results.append(BenchmarkResult(benchmark=name, reason=str(error)))
-    finally:
-        done.set()
-
-
-def _main(argv: Optional[List[str]]) -> int:
-    try:
-        config = settings(list(sys.argv[1:] if argv is None else argv))
+        config, parser = _settings(list(sys.argv[1:] if argv is None else argv))
     except SystemExit as exit_status:
         return int(exit_status.code or 0)
-    names = BENCHMARKS if config.bench == 'all' else (config.bench,)
-    suite_results: List[BenchmarkResult] = []
-    for name in names:
-        runner = BenchmarkRunner()
-        results: List[BenchmarkResult] = []
-        done = Event()
+    runner = BenchmarkRunner()
+    done = Event()
+    try:
         progress = _Progress()
-
-        worker = Thread(target=_execute_benchmark, args=(runner, name, config, progress, results, done),
-                        name='benchset-cli')
-        interrupted = False
-
-        def interrupt(_signum: int, _frame: Optional[FrameType]) -> None:
-            nonlocal interrupted
-            # Raising during Thread.start()/join() can leave the worker running.
-            # Set a flag only; cancellation happens outside the signal handler.
-            interrupted = True
-
-        handles_signals = current_thread() is main_thread()
-        previous_handler = signal.getsignal(signal.SIGINT)
-        if handles_signals:
-            signal.signal(signal.SIGINT, interrupt)
+    except BaseException:
+        # Argument errors preceded terminal inspection before native validation.
+        reason = _duration_error(config)
+        if reason is None:
+            raise
         try:
-            worker.start()
-            while not done.is_set():
-                try:
-                    done.wait(0.05)
-                except KeyboardInterrupt:
-                    interrupted = True
-                if interrupted:
-                    runner.cancel()
-            worker.join()
+            parser.error(reason)
+        except SystemExit as exit_status:
+            return int(exit_status.code or 0)
+    messages: Queue[BenchmarkResult] = Queue()
+    resume = ResultEvent()
+    suites: List[SuiteResult] = []
+    interrupted = False
+    aborted = False
+    pending: Optional[BenchmarkResult] = None
+    argument_errors: List[str] = []
+
+    def validate(native: Native) -> None:
+        # Load under runner ownership so startup Ctrl+C remains cancellable.
+        reason = _duration_error(config, native)
+        if reason is not None:
+            argument_errors.append(reason)
+
+    runner._on_native = validate
+
+    def publish(result: BenchmarkResult) -> bool:
+        if aborted or (argument_errors and not interrupted):
+            return True
+        messages.put(result)
+        resume.wait()
+        resume.clear()
+        return interrupted or aborted
+
+    def execute() -> None:
+        try:
+            if config.bench == 'all':
+                suite = runner._run_all(config.warmup, config.duration, progress, publish)
+                suites.append(suite)
+            else:
+                result = runner.run(config.bench, warmup_seconds=config.warmup,
+                                    measurement_seconds=config.duration, on_progress=progress)
+                publish(result)
+        except Exception as error:  # noqa: BLE001 — Bring background errors to the console.
+            publish(BenchmarkResult(benchmark=config.bench if config.bench != 'all' else BENCHMARKS[0], reason=str(error)))
         finally:
-            if handles_signals:
-                signal.signal(signal.SIGINT, previous_handler)
+            done.set()
+
+    def interrupt(_signum: int, _frame: Optional[FrameType]) -> None:
+        nonlocal interrupted
+        # Defer cancellation and exception handling until outside signal hooks.
+        interrupted = True
+
+    def interrupt_output(signum: int, frame: Optional[FrameType]) -> None:
+        # Break blocked output once, then defer further signals through cleanup.
+        if not interrupted:
+            interrupt(signum, frame)
+            raise KeyboardInterrupt
+
+    def show(result: BenchmarkResult) -> None:
         progress.clear()
-        result = results[0]
-        suite_results.append(result)
         stream = sys.stdout if result.success and not interrupted else sys.stderr
         if stream is not None:
             render(result, stream)
             stream.flush()
-        exit_code = 130 if interrupted or result.status == 'cancelled' else (0 if result.success else 1)
-        if exit_code:
-            if config.bench == 'all' and sys.stderr is not None:
-                # SIGINT can arrive after the final native result completed.
-                render_suite(SuiteResult(tuple(suite_results), AggregatedScores()), sys.stderr)
-            return exit_code
-        if name != names[-1]:
-            sys.stdout.write('\n')
+
+    worker = Thread(target=execute, name='benchset-cli')
+    handles_signals = current_thread() is main_thread()
+    previous_handler = signal.getsignal(signal.SIGINT)
+    output_handler = previous_handler
+
+    def restore_interrupt(unwinding: bool, output: bool = False) -> None:
+        nonlocal previous_handler
+        if handles_signals:
+            while True:
+                try:
+                    if output:
+                        selected = signal.getsignal(signal.SIGINT)
+                        if selected is not interrupt and selected is not output_handler:
+                            previous_handler = selected
+                    signal.signal(signal.SIGINT, interrupt)
+                    return
+                except BaseException:  # Caller signals cannot replace an error during cleanup.
+                    if not unwinding:
+                        raise
+
+    if handles_signals:
+        signal.signal(signal.SIGINT, interrupt)
+    joined = False
+    guard_errors: List[BaseException] = []
+    try:
+        worker.start()
+        while not done.is_set():
+            try:
+                done.wait(0.05)
+            except KeyboardInterrupt:
+                interrupted = True
+            if interrupted:
+                runner.cancel()
+            try:
+                result = messages.get_nowait()
+            except Empty:
+                continue
+            # Intermediate results must be flushed before native may continue;
+            # final results wait for join so late interrupts retain precedence.
+            if config.bench == 'all' and result.success and result.benchmark != BENCHMARKS[-1] and not interrupted:
+                # Output may block; restore the caller's interrupt behavior until acknowledgement.
+                output_handler = interrupt_output if previous_handler is signal.default_int_handler else previous_handler
+                try:
+                    if handles_signals:
+                        signal.signal(signal.SIGINT, output_handler)
+                    if interrupted:
+                        pending = result
+                    else:
+                        show(result)
+                        sys.stdout.write('\n')
+                        progress.reset()
+                except BaseException:
+                    restore_interrupt(True, True)
+                    raise
+                else:
+                    restore_interrupt(False, True)
+            else:
+                pending = result
+            resume.set()
+        worker.join()
+        joined = True
+    finally:
+        try:
+            restore_interrupt(not joined)
+        except BaseException as error:  # noqa: BLE001 — Retain a new guard error until native cleanup finishes.
+            guard_errors.append(error)
+            restore_interrupt(True)
+        try:
+            if worker.ident is not None and worker.is_alive():
+                aborted = True
+                runner.cancel()
+                resume.set()
+                worker.join()
+            if handles_signals:
+                retry = False
+                while True:
+                    try:
+                        if retry:
+                            selected = signal.getsignal(signal.SIGINT)
+                            if selected is not interrupt:
+                                previous_handler = selected
+                        retry = True
+                        signal.signal(signal.SIGINT, previous_handler)
+                        break
+                    except BaseException as error:  # noqa: BLE001 — Caller signals cannot abandon handler restoration.
+                        if joined and not guard_errors:
+                            guard_errors.append(error)
+                        if previous_handler is None and isinstance(error, TypeError):
+                            break
+        finally:
+            if guard_errors:
+                _raise_original(guard_errors.pop())
+    if argument_errors and not interrupted:
+        try:
+            parser.error(argument_errors[0])
+        except SystemExit as exit_status:
+            return int(exit_status.code or 0)
+    if pending is None:
+        if interrupted:
+            return 130
+        raise RuntimeError('native execution did not return a result')
+    show(pending)
+    exit_code = 130 if interrupted or pending.status == 'cancelled' else (0 if pending.success else 1)
     if config.bench == 'all':
-        sys.stdout.write('\n')
-        render_suite(SuiteResult.from_results(tuple(suite_results)), sys.stdout)
-    return 0
+        suite = suites[0] if suites and not exit_code else SuiteResult((), AggregatedScores())
+        stream = sys.stdout if not exit_code else sys.stderr
+        if stream is not None:
+            if not exit_code:
+                stream.write('\n')
+            render_suite(suite, stream)
+    return exit_code

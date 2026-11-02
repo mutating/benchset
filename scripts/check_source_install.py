@@ -35,7 +35,7 @@ assert Path(benchset.__file__).with_name('py.typed').is_file()
 annotations = get_type_hints(BenchmarkResult)
 assert annotations['reference_machine'] is ReferenceMachine
 assert annotations['reference_run'] is ReferenceRun
-for result in (BenchmarkResult('single_core'), run('unknown')):
+for result in (BenchmarkResult('single_core'),):
     assert result.reference_machine is PI_REFERENCE_MACHINE
     assert result.reference_run is PI_REFERENCE_RUN
     payload = json.loads(json.dumps(asdict(result), allow_nan=False))
@@ -43,6 +43,7 @@ for result in (BenchmarkResult('single_core'), run('unknown')):
     assert payload['reference_run']['started_at_unix_seconds'] == 1792767590.517391
     assert 'started_at' not in payload['reference_run']
 ctypes.CDLL = load_native
+assert run('unknown').reason == 'unknown benchmark: unknown'
 machine = asdict(PI_REFERENCE_MACHINE)
 assert machine == {
     'name': 'Raspberry Pi 5 Model B Rev 1.0', 'short_name': 'pi',

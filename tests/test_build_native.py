@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import runpy
 import shutil
 import subprocess
@@ -28,6 +30,7 @@ def test_developer_build_copies_the_fresh_host_library_after_successful_cargo(
     during copying must still see the previous library, never partial bytes;
     interrupted copies must leave that library intact and remove staging files.
     Custom Cargo output directories must supply fresh bytes, never stale target/.
+    The matching Rust-generated metadata must also reach the source package.
     The copied entry point keeps its real relative-path calculations intact.
     """
     system, filename = configuration
@@ -46,13 +49,17 @@ def test_developer_build_copies_the_fresh_host_library_after_successful_cargo(
     monkeypatch.setattr(sys, 'platform', system)
 
     def compile_(arguments: list[str], **options: Any) -> subprocess.CompletedProcess[str]:
-        assert arguments == ['cargo', 'build', '--release', '--locked']
-        assert options == {'cwd': tmp_path, 'check': True}
+        assert arguments == ['cargo', 'build', '--release', '--locked', '--message-format=json-render-diagnostics']
+        assert options == {'cwd': tmp_path, 'check': True, 'env': None, 'stdout': subprocess.PIPE, 'encoding': 'utf-8'}
         assert synchronized[-1] == tmp_path
         library = output / 'release' / filename
         library.parent.mkdir(parents=True, exist_ok=True)
         library.write_bytes(b'fresh native library')
-        return subprocess.CompletedProcess(arguments, 0)
+        metadata = output / 'reported-build-script-output/metadata.json'
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        metadata.write_text('{"fresh": true}\n')
+        message = {'reason': 'build-script-executed', 'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(metadata).hex()]]}
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(message) + '\n')
 
     monkeypatch.setattr(subprocess, 'run', compile_)
     copy = shutil.copy2
@@ -71,6 +78,7 @@ def test_developer_build_copies_the_fresh_host_library_after_successful_cargo(
     previous = installed.read_bytes()
     runpy.run_path(str(script), run_name='__main__')
     assert installed.read_bytes() == b'fresh native library'
+    assert (tmp_path / 'benchset/_metadata.json').read_text() == '{"fresh": true}\n'
     copy_fails = True
     with pytest.raises(OSError, match='copy interrupted'):
         runpy.run_path(str(script), run_name='__main__')

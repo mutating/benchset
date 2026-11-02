@@ -4,6 +4,7 @@ from dataclasses import replace
 from typing import Optional, Tuple
 
 from benchset import (
+    BENCHMARKS,
     PI_REFERENCE_MACHINE,
     PI_REFERENCE_RUN,
     AggregatedScores,
@@ -15,6 +16,8 @@ from benchset import (
     run,
     run_all,
 )
+
+benchmarks: Tuple[str, str] = BENCHMARKS
 
 
 def metadata(result: BenchmarkResult) -> Tuple[ReferenceMachine, ReferenceRun]:

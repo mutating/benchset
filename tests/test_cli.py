@@ -4,6 +4,7 @@ import argparse
 import io
 import locale
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -25,6 +26,94 @@ from benchset import (
     __version__,
     cli,
 )
+from tests.helpers import mock_suite
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX pipe backpressure and subprocess SIGINT')
+@pytest.mark.parametrize('operation', ['render', 'flush', 'separator', 'pending'])
+def test_sigint_interrupts_blocked_intermediate_output(operation: str) -> None:
+    """Ctrl+C interrupts every intermediate output operation before native is acknowledged.
+
+    Fill a real pipe and keep its reader open without draining it. A proxy routes
+    exactly the selected output operation into that pipe; stderr synchronizes
+    SIGINT delivery. Unbuffered child output isolates this from shutdown flushes.
+    A signal pending before handler restoration must bypass stdout altogether.
+    """
+    reader, writer = os.pipe()
+    process = None
+    try:
+        os.set_blocking(writer, False)
+        try:
+            while True:
+                os.write(writer, b'x' * 4096)
+        except BlockingIOError:
+            pass
+        os.set_blocking(writer, True)
+        program = r'''
+import signal
+import sys
+from benchset import cli
+
+output = sys.stdout
+operation = sys.argv[1]
+def blocked_write():
+    sys.stderr.write('blocked\n')
+    sys.stderr.flush()
+    output.write('x')
+
+class Output:
+    encoding = 'utf-8'
+    def isatty(self): return False
+    def write(self, text):
+        if operation == 'render' or (operation in ('separator', 'pending') and text == '\n'):
+            blocked_write()
+        return len(text)
+    def flush(self):
+        if operation == 'flush': blocked_write()
+
+previous = signal.getsignal(signal.SIGINT)
+if operation == 'pending':
+    install = signal.signal
+    fired = []
+    def deliver_before_restore(signum, handler):
+        if (handler is previous or getattr(handler, '__name__', '') == 'interrupt_output') and not fired:
+            fired.append(True)
+            signal.raise_signal(signal.SIGINT)
+        return install(signum, handler)
+    signal.signal = deliver_before_restore
+sys.stdout = Output()
+try:
+    status = cli.main(['--warmup=0', '--duration=.1'])
+finally:
+    sys.stdout = output
+assert signal.getsignal(signal.SIGINT) is previous
+raise SystemExit(status)
+'''
+        process = subprocess.Popen([sys.executable, '-u', '-c', program, operation],
+                                   stdout=writer, stderr=subprocess.PIPE, text=True)
+        os.close(writer)
+        writer = -1
+        assert process.stderr is not None
+        if operation == 'pending':
+            assert process.wait(timeout=3) == 130
+            diagnostics = process.stderr.read()
+            assert 'single_core' in diagnostics
+            assert 'Full Pi equivalent :' in diagnostics
+            assert 'blocked' not in diagnostics
+            return
+        assert select.select([process.stderr], [], [], 5)[0], 'output operation was never reached'
+        assert process.stderr.readline() == 'blocked\n'
+        process.send_signal(signal.SIGINT)
+        assert process.wait(timeout=3) == 130
+        assert not process.stderr.read()
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+        if writer >= 0:
+            os.close(writer)
+        os.close(reader)
 
 # Content checks allow slow interpreter startup on shared runners. Cancellation
 # and terminal-disconnect responsiveness retain their separate 5-second bounds.
@@ -260,6 +349,7 @@ def test_defaults_repeated_options_and_environment_independence(
         return BenchmarkResult(benchmark, status='completed', score=1, pi_equivalent=1)
 
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     monkeypatch.setenv('BENCHSET_WARMUP', '0')
     monkeypatch.setenv('BENCHSET_DURATION', '0')
     assert cli.main([]) == 0
@@ -339,6 +429,7 @@ def test_cli_worker_exception_retains_benchmark_and_stops_the_suite(
         raise RuntimeError('backend unavailable')
 
     monkeypatch.setattr(BenchmarkRunner, 'run', fail)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench', benchmark]) == 1
     captured = capsys.readouterr()
     assert not captured.out
@@ -435,6 +526,115 @@ def test_render_handles_real_stream_encodings_without_losing_values(encoding: st
     assert ('Причина' if encoding != 'ascii' else '\\u041f') in text
     assert ('  —' if encoding != 'ascii' else '  -') in text.splitlines()
     stream.detach()
+
+
+@pytest.mark.parametrize('ignored', [False, True])
+def test_intermediate_output_preserves_caller_sigint_policy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], ignored: bool,
+) -> None:
+    """Custom and ignored Ctrl+C during output keep the suite running and restore the caller's policy."""
+    mock_suite(monkeypatch)
+    monkeypatch.setattr(BenchmarkRunner, 'run', lambda _self, name, **_options:
+                        BenchmarkResult(name, status='completed', score=1, pi_equivalent=1))
+    calls: List[int] = []
+    handler = signal.SIG_IGN if ignored else lambda signum, _frame: calls.append(signum)
+    previous = signal.signal(signal.SIGINT, handler)
+    render = cli.render
+
+    def interrupted_render(result: BenchmarkResult, stream: TextIO) -> None:
+        if result.benchmark == 'single_core':
+            signal.raise_signal(signal.SIGINT)
+        render(result, stream)
+
+    monkeypatch.setattr(cli, 'render', interrupted_render)
+    try:
+        assert cli.main(['--warmup=0', '--duration=.01']) == 0
+        assert calls == ([] if ignored else [signal.SIGINT])
+        assert signal.getsignal(signal.SIGINT) is handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    captured = capsys.readouterr()
+    assert 'single_core' in captured.out
+    assert 'multi_core' in captured.out
+    assert 'Full Pi equivalent' in captured.out
+    assert not captured.err
+
+
+@pytest.mark.parametrize('boundary', ['handler', 'render', 'restore'])
+def test_repeated_sigint_at_output_handoff_waits_for_native_cleanup(boundary: str) -> None:
+    """A second Ctrl+C cannot escape cleanup after the output handler takes over.
+
+    Interrupt after installing the caller's handler, while rendering, or before
+    reinstating the CLI handler, then interrupt join with native cleanup blocked.
+    An independent worker completion event detects premature return even if an
+    interrupted Thread.join incorrectly reports the thread as stopped.
+    """
+    program = 'BOUNDARY = ' + repr(boundary) + '''
+import signal
+from threading import Event, Thread
+from benchset import BenchmarkRunner, cli
+from benchset._native import Native
+
+entered, release, finished = (Event() for _ in range(3))
+runner, workers = BenchmarkRunner(), []
+free, install = Native.free, signal.signal
+previous = signal.getsignal(signal.SIGINT)
+armed = True
+outputting = False
+def interrupted_install(signum, handler):
+    global armed, outputting
+    if BOUNDARY == 'restore' and outputting and handler is not previous and armed:
+        armed = False
+        signal.raise_signal(signal.SIGINT)
+    old = install(signum, handler)
+    is_output = handler is previous or getattr(handler, '__name__', '') == 'interrupt_output'
+    if is_output: outputting = True
+    if BOUNDARY == 'handler' and is_output and armed:
+        armed = False
+        signal.raise_signal(signal.SIGINT)
+    return old
+def blocked_free(self, *args, **kwargs):
+    free(self, *args, **kwargs)
+    entered.set()
+    assert release.wait(5), 'cleanup was never released'
+def interrupted_render(*args):
+    signal.raise_signal(signal.SIGINT)
+class Worker(Thread):
+    armed = True
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        workers.append(self)
+    def run(self):
+        try:
+            super().run()
+        finally:
+            finished.set()
+    def join(self, *args, **kwargs):
+        if self.armed:
+            self.armed = False
+            assert entered.wait(5), 'native cleanup was never reached'
+            signal.raise_signal(signal.SIGINT)
+            release.set()
+        return super().join(*args, **kwargs)
+Native.free = blocked_free
+signal.signal = interrupted_install
+cli.Thread = Worker
+cli.BenchmarkRunner = lambda: runner
+if BOUNDARY == 'render': cli.render = interrupted_render
+try:
+    code = cli.main(['--warmup=0', '--duration=.1'])
+    assert finished.is_set(), 'CLI returned before native cleanup'
+    assert runner._active is None, 'CLI returned with runner ownership still claimed'
+    assert signal.getsignal(signal.SIGINT) is previous
+    assert code == 130
+finally:
+    release.set()
+    for worker in workers: Thread.join(worker, timeout=5)
+'''
+    result = subprocess.run([sys.executable, '-c', program], capture_output=True,
+                            text=True, check=False, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not result.stderr
 
 
 @pytest.mark.parametrize('stage', ['start', 'join'])
@@ -577,6 +777,7 @@ def test_redirected_result_is_flushed_before_the_next_benchmark_starts(monkeypat
         return BenchmarkResult(name, status='completed', score=1, pi_equivalent=1)
 
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     assert cli.main(['--warmup=0', '--duration=.03']) == 0
     assert 'multi_core' in output.published
 
@@ -606,6 +807,7 @@ def test_terminal_progress_fits_and_erases_previous_longer_phases(
         return BenchmarkResult(benchmark, status='completed', score=1, pi_equivalent=1)
 
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench', 'single_core']) == 0
     progress, result = terminal.getvalue().split('Benchmark', 1)
     fragments = [part for part in progress.split('\r') if part]
@@ -645,6 +847,7 @@ def test_terminal_shrink_before_progress_cleanup_does_not_wrap(monkeypatch: pyte
         return BenchmarkResult(benchmark, status='completed', score=1, pi_equivalent=1)
 
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench=single_core']) == 0
     progress = terminal.getvalue().split('Benchmark', 1)[0]
     frames = [part for part in progress.split('\r') if part]
@@ -875,6 +1078,7 @@ def test_missing_stderr_preserves_unsuccessful_benchmark_exit_status(
 
     output = io.StringIO()
     monkeypatch.setattr(BenchmarkRunner, 'run', run)
+    mock_suite(monkeypatch)
     monkeypatch.setattr(cli.sys, 'stdout', output)
     monkeypatch.setattr(cli.sys, 'stderr', None)
     assert cli.main(['--warmup=0', '--duration=.03']) == expected

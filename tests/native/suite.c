@@ -4,6 +4,15 @@
 #include <stdio.h>
 
 _Static_assert(sizeof(BenchsetAggregatedScores) == 16, "aggregate layout");
+_Static_assert(sizeof(BenchsetAggregateInput) == 24, "aggregate input layout");
+_Static_assert(offsetof(BenchsetAggregateInput, pi_equivalent) == 8, "ratio offset");
+_Static_assert(offsetof(BenchsetAggregateInput, has_pi_equivalent) == 16, "ratio presence offset");
+/** Keep aggregate counts 64-bit and preserve const input/writable output in the public declaration. */
+_Static_assert(
+    _Generic(&benchset_aggregate,
+             int32_t (*)(const BenchsetAggregateInput *, uint64_t, BenchsetAggregatedScores *): 1,
+             default: 0),
+    "aggregate signature");
 _Static_assert(sizeof(BenchsetSuiteResult) == 32, "suite layout");
 _Static_assert(offsetof(BenchsetSuiteProgress, progress) == 8, "progress layout");
 
@@ -21,6 +30,14 @@ static void cancel(const BenchsetSuiteProgress *progress, void *handle) {
 
 /** Checks suite layout, getters and cancellation; benchmark override must leave const config unchanged. */
 int main(void) {
+    /* Independent C layout/call: nonzero presence flags and caller-built ratios must survive the ABI. */
+    const BenchsetAggregateInput inputs[] = {
+        {BENCHSET_SINGLE_CORE, BENCHSET_COMPLETED, 0.5, 7},
+        {BENCHSET_MULTI_CORE, BENCHSET_COMPLETED, 2.0, UINT32_MAX}
+    };
+    BenchsetAggregatedScores aggregate;
+    assert(benchset_aggregate(inputs, 2, &aggregate));
+    assert(aggregate.has_pi_equivalent && aggregate.pi_equivalent == 1.0);
     BenchsetConfig config;
     assert(benchset_default_config(&config));
     config.benchmark = 999; /* Ignored by the suite entrypoint. */

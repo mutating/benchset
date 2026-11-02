@@ -1,4 +1,5 @@
 //! Sustained scalar CPU throughput, available through Rust and a C ABI.
+include!("catalog.rs");
 mod ffi;
 mod kernel;
 mod reference;
@@ -15,26 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const DEFAULT_WARMUP_SECONDS: f64 = 120.0;
-pub const DEFAULT_MEASUREMENT_SECONDS: f64 = 60.0;
-pub const BENCHMARKS: [Benchmark; 2] = [Benchmark::SingleCore, Benchmark::MultiCore];
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum Benchmark {
-    SingleCore = 1,
-    MultiCore = 2,
-}
-
-impl Benchmark {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::SingleCore => "single_core",
-            Self::MultiCore => "multi_core",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -163,33 +145,110 @@ pub struct SuiteResult {
 
 impl SuiteResult {
     pub fn new(results: Vec<BenchmarkResult>) -> Self {
-        let complete = results.len() == BENCHMARKS.len()
-            && results.iter().zip(BENCHMARKS).all(|(result, benchmark)| {
-                result.benchmark == benchmark
-                    && result.status == Status::Completed
-                    && result
-                        .pi_equivalent
-                        .is_some_and(|value| value.is_finite() && value >= 0.0)
-            });
-        let pi_equivalent = complete.then(|| {
-            if results
-                .iter()
-                .any(|result| result.pi_equivalent == Some(0.0))
-            {
-                return 0.0;
-            }
-            (results
-                .iter()
-                .map(|result| result.pi_equivalent.unwrap().ln())
-                .sum::<f64>()
-                / results.len() as f64)
-                .exp()
-        });
+        let pi_equivalent = aggregate(
+            results.len(),
+            |index, expected| results[index].benchmark == expected,
+            |index| results[index].status as u32,
+            |index| results[index].pi_equivalent,
+        );
         Self {
             results,
             aggregated_scores: AggregatedScores { pi_equivalent },
         }
     }
+}
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum AggregateOperator {
+    GreaterEqual = 2,
+    Equal = 3,
+}
+
+fn finite(value: f64) -> bool {
+    value.to_bits() & 0x7ff0_0000_0000_0000 != 0x7ff0_0000_0000_0000
+}
+
+fn zero(value: f64) -> bool {
+    value.to_bits() << 1 == 0
+}
+
+fn nonnegative(value: f64) -> bool {
+    let bits = value.to_bits();
+    bits <= 0x7fef_ffff_ffff_ffff || bits == 0x8000_0000_0000_0000
+}
+
+fn positive(value: f64) -> bool {
+    value.to_bits().wrapping_sub(1) < 0x7fef_ffff_ffff_ffff
+}
+
+trait AggregateValue {
+    fn number(&self) -> f64;
+    fn compare(&self, operator: AggregateOperator, operand: u32) -> Option<bool>;
+    fn logarithm(&self) -> Option<f64> {
+        Some(self.number().ln())
+    }
+
+    fn exponential(&self, exponent: f64) -> Option<f64> {
+        Some(exponent.exp())
+    }
+}
+
+impl AggregateValue for f64 {
+    fn number(&self) -> f64 {
+        *self
+    }
+
+    fn compare(&self, operator: AggregateOperator, _operand: u32) -> Option<bool> {
+        // The calculator compares only with integer zero; do not signal on NaNs.
+        Some(match operator {
+            AggregateOperator::GreaterEqual => nonnegative(*self),
+            AggregateOperator::Equal => zero(*self),
+        })
+    }
+}
+
+fn aggregate<T: AggregateValue>(
+    count: usize,
+    mut matches: impl FnMut(usize, Benchmark) -> bool,
+    mut status: impl FnMut(usize) -> u32,
+    mut ratio: impl FnMut(usize) -> Option<T>,
+) -> Option<f64> {
+    // Tuple identity comparison visits the common prefix before length differs.
+    if !BENCHMARKS
+        .into_iter()
+        .take(count)
+        .enumerate()
+        .all(|(index, expected)| matches(index, expected))
+        || count != BENCHMARKS.len()
+    {
+        return None;
+    }
+    // Host values may require fallible conversion. Read them only when needed,
+    // preserving structural and left-to-right short-circuiting in the core.
+    let values = (0..count)
+        .map(|index| {
+            if status(index) != Status::Completed as u32 {
+                return None;
+            }
+            let value = ratio(index)?;
+            if !finite(value.number()) || !value.compare(AggregateOperator::GreaterEqual, 0)? {
+                return None;
+            }
+            Some(value)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // Preserve the caller's floating environment: a zero skips every logarithm.
+    for value in &values {
+        if value.compare(AggregateOperator::Equal, 0)? {
+            return Some(0.0);
+        }
+    }
+    let mut logarithms = 0.0;
+    for value in &values {
+        logarithms += value.logarithm()?;
+    }
+    values[0].exponential(logarithms / BENCHMARKS.len() as f64)
 }
 
 /// Run every benchmark in order, stopping after failure or cancellation.
@@ -207,10 +266,18 @@ pub fn run_all(
 }
 
 fn run_suite(mut runner: impl FnMut(Benchmark) -> BenchmarkResult) -> SuiteResult {
+    run_suite_with(|benchmark| Some((runner(benchmark), true)))
+}
+
+fn run_suite_with(
+    mut runner: impl FnMut(Benchmark) -> Option<(BenchmarkResult, bool)>,
+) -> SuiteResult {
     let mut results = Vec::new();
     for benchmark in BENCHMARKS {
-        let result = runner(benchmark);
-        let completed = result.status == Status::Completed;
+        let Some((result, proceed)) = runner(benchmark) else {
+            break;
+        };
+        let completed = result.status == Status::Completed && proceed;
         results.push(result);
         if !completed {
             break;

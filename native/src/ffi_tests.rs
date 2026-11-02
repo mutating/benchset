@@ -1,4 +1,96 @@
 use super::*;
+
+/// A converted double is copied once, preserving bits, borrowed input and output bounds.
+/// Null readers/outputs must not invoke the callback or change the destination;
+/// an aliased input/output verifies that reading finishes before writing starts.
+#[test]
+fn double_copy_preserves_bits_and_borrowed_ownership() {
+    #[repr(C)]
+    struct Input {
+        bits: u64,
+        calls: usize,
+    }
+    unsafe extern "C" fn read(user: *mut c_void) -> f64 {
+        let input = &mut *user.cast::<Input>();
+        input.calls += 1;
+        let bits = input.bits;
+        input.bits = bits.wrapping_add(1);
+        f64::from_bits(bits)
+    }
+    static NULL_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    unsafe extern "C" fn read_null(user: *mut c_void) -> f64 {
+        assert!(user.is_null());
+        NULL_CALLS.fetch_add(1, Ordering::Relaxed);
+        -0.0
+    }
+    unsafe {
+        let mut input = Input { bits: 1, calls: 0 };
+        let mut untouched = 42.0;
+        assert_eq!(
+            benchset_copy_double(None, ptr::null_mut(), &mut untouched),
+            0
+        );
+        assert_eq!(untouched, 42.0);
+        assert_eq!(
+            benchset_copy_double(None, ptr::null_mut(), ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            benchset_copy_double(
+                Some(read),
+                (&mut input as *mut Input).cast(),
+                ptr::null_mut()
+            ),
+            0
+        );
+        assert_eq!(input.calls, 0);
+        assert_eq!(input.bits, 1);
+        for bits in [
+            0,
+            1,
+            0x8000_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+            0x7ff0_0000_0000_0001,
+            0xfff0_0000_0000_0001,
+            0x7ff8_0000_0000_0001,
+            0x7ff0_0000_0000_0000,
+        ] {
+            let mut input = Input { bits, calls: 0 };
+            let mut output = [0x1234_u64, 0x5678, 0x9abc];
+            assert_eq!(
+                benchset_copy_double(
+                    Some(read),
+                    (&mut input as *mut Input).cast(),
+                    output.as_mut_ptr().add(1).cast()
+                ),
+                1
+            );
+            assert_eq!(output, [0x1234, bits, 0x9abc]);
+            assert_eq!(input.calls, 1);
+            assert_eq!(input.bits, bits.wrapping_add(1));
+            input.calls = 0;
+            input.bits = bits;
+            let pointer = &mut input as *mut Input;
+            assert_eq!(
+                benchset_copy_double(
+                    Some(read),
+                    pointer.cast(),
+                    ptr::addr_of_mut!((*pointer).bits).cast()
+                ),
+                1
+            );
+            assert_eq!(input.calls, 1);
+            assert_eq!(input.bits, bits);
+        }
+        NULL_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(
+            benchset_copy_double(Some(read_null), ptr::null_mut(), &mut untouched),
+            1
+        );
+        assert_eq!(untouched.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(NULL_CALLS.load(Ordering::Relaxed), 1);
+    }
+}
 use crate::{Phase, Sample};
 use std::ffi::CStr;
 use std::mem::{size_of, MaybeUninit};

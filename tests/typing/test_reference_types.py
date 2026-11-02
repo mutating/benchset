@@ -13,7 +13,7 @@ import pytest
 def test_result_reference_public_type_contract(
     tmp_path: Path, fixture: str, expected_status: int,
 ) -> None:
-    """Catch public annotation regressions, including suite tuple and score types."""
+    """Catch public annotation regressions, including the fixed benchmark tuple and score types."""
     source = Path(__file__).with_name(fixture)
     result = subprocess.run([
         sys.executable, '-m', 'mypy', '--strict', '--disallow-any-expr',
@@ -32,15 +32,19 @@ def test_result_reference_public_type_contract(
         assert any('"reference_machine"' in error and 'read-only' in error and '[misc]' in error for error in errors)
 
 
-def test_positive_result_reference_consumer_runs_without_native_code() -> None:
-    """The typed failure/metadata consumer also runs without loading a native library."""
+def test_positive_result_reference_consumer_imports_without_native_code() -> None:
+    """Typed metadata imports stay native-free; execution may load Rust for validation."""
     program = """
 import ctypes
-import runpy
+load_native = ctypes.CDLL
 def forbidden(*args, **kwargs):
     raise AssertionError('typed metadata consumer must not load native code')
 ctypes.CDLL = forbidden
-runpy.run_module('tests.typing.reference_positive', run_name='__main__')
+from tests.typing import reference_positive
+from benchset import BenchmarkResult
+reference_positive.metadata(BenchmarkResult('single_core'))
+ctypes.CDLL = load_native
+reference_positive.main()
 """
     result = subprocess.run([sys.executable, '-c', program], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr

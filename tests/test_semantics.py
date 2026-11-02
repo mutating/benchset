@@ -18,6 +18,7 @@ from benchset import (
     BenchmarkRunner,
     Progress,
     Sample,
+    SuiteResult,
     api,
     cli,
     run,
@@ -32,7 +33,7 @@ from benchset._native import (
     CSample,
     Native,
 )
-from tests.helpers import assert_result_references, assert_runner_reusable
+from tests.helpers import assert_result_references, assert_runner_reusable, mock_suite
 
 
 def test_model_and_result_versions_come_from_package_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,17 +60,17 @@ def test_model_and_result_versions_come_from_package_metadata(monkeypatch: pytes
     (math.nan, 1), (math.inf, 1), (-math.inf, 1), (-1, 1),
     (0, math.nan), (0, math.inf), (0, -math.inf), (0, -1), (0, -0.0),
 ])
-def test_python_validation_does_not_allocate_native(
+def test_invalid_durations_do_not_allocate_a_native_handle(
     monkeypatch: pytest.MonkeyPatch, warmup: float, measurement: float,
 ) -> None:
-    """Reject bad durations before loading Rust and identify the offending option.
+    """Reject bad durations before allocating workers and identify the offending option.
 
     A generic failure reason hides whether the caller must fix warmup or
     measurement and whether zero is allowed for that particular duration.
     """
-    def forbidden() -> Native:
-        pytest.fail('invalid options must not load native code')
-    monkeypatch.setattr(api, 'Native', forbidden)
+    native = Native()
+    monkeypatch.setattr(api, 'Native', lambda: native)
+    monkeypatch.setattr(native, 'create', lambda *_args: pytest.fail('invalid options must not allocate a handle'))
     result = run('single_core', warmup_seconds=warmup, measurement_seconds=measurement)
     assert_result_references(result)
     assert result.status == 'failed'
@@ -92,6 +93,7 @@ def test_python_validation_does_not_allocate_native(
 
 @pytest.mark.parametrize(('warmup', 'measurement'), [(sys.float_info.max, 1), (0, sys.float_info.max), (0, 1e-12)])
 def test_native_duration_limits_preserve_requested_diagnostics(warmup: float, measurement: float) -> None:
+    """Unrepresentable and rounded-to-zero windows retain their exact native errors and requested values."""
     result = run('single_core', warmup_seconds=warmup, measurement_seconds=measurement)
     assert_result_references(result)
     assert result.status == 'failed'
@@ -99,7 +101,8 @@ def test_native_duration_limits_preserve_requested_diagnostics(warmup: float, me
     assert result.pi_equivalent is None
     assert result.warmup_seconds == warmup
     assert result.measurement_seconds == measurement
-    assert result.reason
+    assert result.reason == ('measurement duration must be positive' if measurement == 1e-12
+                             else 'durations must be finite: warmup >= 0, measurement > 0')
 
 
 @pytest.mark.parametrize('phase', ['warmup', 'measurement', 'completed'])
@@ -193,12 +196,15 @@ def test_reentrant_runner_global_busy_and_idle_cancellation() -> None:
 
 class ManagedNative(Native):
     def __init__(self) -> None:
+        self.lib = Native().lib
         self.calls: List[str] = []
+        self.suites: List[bool] = []
         self.error_at: Optional[str] = None
         self.created, self.release = Event(), Event()
         self.delay_create = False
 
-    def create(self) -> int:
+    def create(self, suite: bool = False) -> int:
+        self.suites.append(suite)
         self.calls.append('create')
         if self.error_at == 'create':
             raise RuntimeError('create failure')
@@ -207,12 +213,14 @@ class ManagedNative(Native):
             assert self.release.wait(5)
         return 123
 
-    def cancel(self, handle: int) -> None:
+    def cancel(self, handle: int, suite: bool = False) -> None:
         assert handle == 123
+        assert suite == self.suites[-1]
         self.calls.append('cancel')
 
-    def free(self, handle: int) -> None:
+    def free(self, handle: int, suite: bool = False) -> None:
         assert handle == 123
+        assert suite == self.suites[-1]
         self.calls.append('free')
 
     def execute(
@@ -227,6 +235,19 @@ class ManagedNative(Native):
             on_progress(Progress(benchmark, 'completed', 1, 1, 0.1, 0.1, 8))
         return BenchmarkResult(benchmark, status='completed', score=80,
                                warmup_seconds=warmup_seconds, measurement_seconds=measurement_seconds)
+
+    def execute_suite(self, handle: int, warmup_seconds: float, measurement_seconds: float,
+                      on_progress: Optional[Callable[[Progress], None]],
+                      on_result: Optional[Callable[[BenchmarkResult], bool]] = None,
+                      _convert_windows: Optional[Callable[[], Tuple[float, float]]] = None) -> SuiteResult:
+        results = []
+        for name in ('single_core', 'multi_core'):
+            result = self.execute(handle, name, warmup_seconds, measurement_seconds, on_progress)
+            results.append(result)
+            stop = on_result(result) if on_result is not None else False
+            if not result.success or stop:
+                break
+        return SuiteResult.from_results(tuple(results))
 
 
 @pytest.mark.parametrize('entrypoint', ['runner', 'run', 'run_all'])
@@ -266,7 +287,7 @@ def test_public_api_forwards_durations_and_callback_without_running_long_benchma
     assert [event.benchmark for event in events] == benchmarks
     assert callback_threads == [caller] * len(benchmarks)
     assert all(result.success for result in results)
-    assert backend.calls == ['create', 'execute', 'free'] * len(benchmarks)
+    assert backend.calls == ['create'] + ['execute'] * len(benchmarks) + ['free']
 
 
 @pytest.mark.parametrize('stage', ['init', 'create', 'execute'])
@@ -363,12 +384,24 @@ def test_busy_call_cannot_clear_another_threads_runner_ownership(monkeypatch: py
 
 class ResultLibrary:
     def __init__(self, status: int, reason: Optional[bytes], has_variation: int) -> None:
+        self.core = Native().lib
+        # Keep numeric transport real while replacing benchmark result payloads.
+        self.benchset_copy_double = self.core.benchset_copy_double
         self.value = CResultV2(1, status, 2, 2**32 - 1, 123.5, 2.5, 3.5, 4.5, 0,
                                2**64 - 1, 2**64 - 2, 2, 7, has_variation, 0.375, 1)
         self.reason = reason
         self.config: Optional[Config] = None
         self.cancelled = 0
         self.phases = [1, 2, 3, 4, 5]
+
+    def benchset_benchmark_id(self, name: bytes, size: int) -> int:
+        return int(self.core.benchset_benchmark_id(name, size))
+
+    def benchset_validation_error(self, benchmark: int, warmup: float, measurement: float) -> int:
+        return int(self.core.benchset_validation_error(benchmark, warmup, measurement))
+
+    def benchset_validation_message(self, error: int, cli: int) -> bytes:
+        return self.core.benchset_validation_message(error, cli)
 
     def benchset_run(self, _handle: int, config: Any, callback: Callable[..., None], _user: object) -> int:
         raw = ctypes.cast(config, ctypes.POINTER(Config)).contents
@@ -567,7 +600,8 @@ def test_suite_order_forwarding_and_early_stop(monkeypatch: pytest.MonkeyPatch, 
         assert (warmup_seconds, measurement_seconds, on_progress) == (0.75, 1.25, callback)
         names.append(name)
         return BenchmarkResult(name, status=status if len(names) - 1 == stop_index else 'completed')
-    monkeypatch.setattr(api, 'run', execute)
+    monkeypatch.setattr(BenchmarkRunner, 'run', lambda _self, name, **options: execute(name, **options))
+    mock_suite(monkeypatch)
     results = run_all(warmup_seconds=0.75, measurement_seconds=1.25, on_progress=callback).results
     for result in results:
         assert_result_references(result)
@@ -606,6 +640,7 @@ def test_cli_exit_stream_and_early_stop(monkeypatch: pytest.MonkeyPatch, capsys:
                                variation_percent=0 if status == 'completed' else None,
                                samples=(Sample(1, 1, 80, 80),) if status == 'completed' else ())
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     assert cli.main(['--warmup', '0', '--duration', '0.1']) == code
     captured = capsys.readouterr()
     assert calls == (['single_core', 'multi_core'] if status == 'completed' else ['single_core'])
@@ -676,6 +711,7 @@ def test_cli_selected_benchmark_runs_once(monkeypatch: pytest.MonkeyPatch, bench
         names.append(name)
         return BenchmarkResult(name, status='completed', score=1)
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench', benchmark, '--warmup', '0', '--duration', '0.1']) == 0
     assert names == [benchmark]
 
@@ -703,6 +739,7 @@ def test_cli_repeated_interrupt_has_priority_over_completed_result(
     def execute(_self: BenchmarkRunner, name: str, **_kwargs: object) -> BenchmarkResult:
         return BenchmarkResult(name, status='completed', score=1)
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench', 'single_core']) == 130
     captured = capsys.readouterr()
     assert not captured.out
@@ -740,8 +777,8 @@ def test_cancel_racing_cleanup_never_reuses_freed_handle(monkeypatch: pytest.Mon
     freeing, release, cancelling = Event(), Event(), Event()
 
     class SlowFree(ManagedNative):
-        def free(self, handle: int) -> None:
-            super().free(handle)
+        def free(self, handle: int, suite: bool = False) -> None:
+            super().free(handle, suite)
             freeing.set()
             assert release.wait(5)
     backend = SlowFree()
@@ -775,6 +812,7 @@ def test_cancel_racing_cleanup_never_reuses_freed_handle(monkeypatch: pytest.Mon
 def test_cli_information_does_not_initialize_native(monkeypatch: pytest.MonkeyPatch, argument: str) -> None:
     def forbidden() -> Native:
         pytest.fail('informational CLI commands must not load native code')
+    monkeypatch.setattr(cli, 'Native', lambda: pytest.fail('CLI information must not load native code'))
     monkeypatch.setattr(api, 'Native', forbidden)
     assert cli.main([argument]) == 0
 

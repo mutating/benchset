@@ -8,7 +8,7 @@ import pytest
 
 from benchset import BenchmarkResult, BenchmarkRunner, api, cli, run, run_all
 from benchset._native import Native
-from tests.helpers import assert_result_references
+from tests.helpers import assert_result_references, mock_suite
 
 
 def test_missing_library_is_a_failed_result(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,6 +109,7 @@ def test_background_failure_reaches_stderr(monkeypatch: pytest.MonkeyPatch, caps
     def broken(*_arguments: object, **_keywords: object) -> BenchmarkResult:
         raise RuntimeError('background failure')
     monkeypatch.setattr(BenchmarkRunner, 'run', broken)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '0.02']) == 1
     captured = capsys.readouterr()
     assert not captured.out
@@ -168,7 +169,8 @@ def test_cli_interrupt_at_worker_boundaries(
     monkeypatch.setattr(cli, 'BenchmarkRunner', lambda: runner)
     try:
         try:
-            status = cli.main(['--warmup', '0', '--duration', '0.05'])
+            selection = ['--bench', 'single_core'] if 'join' in boundary else []
+            status = cli.main([*selection, '--warmup', '0', '--duration', '0.05'])
         except KeyboardInterrupt:
             pytest.fail('SIGINT escaped the CLI during ' + boundary)
         assert status == 130
@@ -179,7 +181,7 @@ def test_cli_interrupt_at_worker_boundaries(
                 Thread.join(worker, 5)
     assert workers
     assert all(not worker.is_alive() for worker in workers)
-    assert len(workers) == 1  # An interrupted suite must not start multi_core.
+    assert len(workers) == 1  # Each command owns one worker, including native suites.
     assert signal.getsignal(signal.SIGINT) is original_handler
     captured = capsys.readouterr()
     assert not captured.out
@@ -199,10 +201,12 @@ def test_cli_restores_signal_handler_after_start_failure(monkeypatch: pytest.Mon
     assert signal.getsignal(signal.SIGINT) is original_handler
 
 
-def test_cli_can_run_outside_main_thread(capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize('selection', ['single_core', 'all'])
+def test_cli_can_run_outside_main_thread(capsys: pytest.CaptureFixture[str], selection: str) -> None:
+    """Single and streaming-suite output must avoid installing signal handlers off the main thread."""
     results: List[int] = []
     worker = Thread(target=lambda: results.append(cli.main([
-        '--bench', 'single_core', '--warmup', '0', '--duration', '0.02',
+        '--bench', selection, '--warmup', '0', '--duration', '0.02',
     ])))
     worker.start()
     worker.join(5)

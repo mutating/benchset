@@ -136,6 +136,10 @@ def test_source_install_cli_capture_matches_its_echo_stream(  # noqa: PLR0915 - 
     monkeypatch.setenv('PATH', os.pathsep.join(map(str, tool_paths)))
     program = 'COMPLETED_COUNT = ' + str(completed_count) + '''
 from benchset import BenchmarkResult, BenchmarkRunner, cli
+import pytest
+from tests.helpers import mock_suite
+patch = pytest.MonkeyPatch()
+mock_suite(patch)
 calls = 0
 def completed(_self, name, *, warmup_seconds, measurement_seconds, **_options):
     global calls
@@ -684,7 +688,7 @@ def test_installed_api_check_visits_both_workloads_and_accepts_only_exact_no_wor
 
     def execute(name: str, **_options: object) -> benchset.BenchmarkResult:
         if name == 'unknown':
-            return benchset.BenchmarkResult(name)
+            return benchset.BenchmarkResult(name, reason='unknown benchmark: unknown')
         calls.append(name)
         reason = ('unexpected native failure' if failure == 'generic failure'
                   else 'measurement window was too short to complete any work')
@@ -768,7 +772,13 @@ def test_native_build_entrypoints_synchronize_before_invoking_cargo(
 def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
     bumped_source_snapshot: Path, rust_tools: Tuple[Dict[str, str], str, str], tmp_path: Path,
 ) -> None:
+    """Build real distributions outside the checkout and replace stale source metadata.
+
+    Poisoning the checked snapshot ensures the installed wheel consumes freshly
+    compiled Rust data rather than merely shipping a matching historical copy.
+    """
     environment, _cargo, _target = rust_tools
+    (bumped_source_snapshot / 'benchset/_metadata.json').write_text('{"stale": true}\n', encoding='utf-8')
     sdists = tmp_path / 'sdists'
     execute([sys.executable, '-m', 'build', '--sdist', '--outdir', str(sdists)],
             bumped_source_snapshot, environment)
@@ -779,6 +789,9 @@ def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
     with tarfile.open(archive) as package:
         package.extractall(unpacked)
     source = next(unpacked.iterdir())
+    assert (source / 'native/build.rs').is_file()
+    assert (source / 'native/src/catalog.rs').is_file()
+    assert (source / 'benchset/_metadata.json').is_file()
     assert json.loads((source / 'native/reference-calibration.json').read_text(encoding='utf-8'))
     wheels = tmp_path / 'wheels'
     # Build from the unpacked sdist, whose manifest may differ from the checkout.
@@ -787,7 +800,9 @@ def test_sdist_builds_an_installable_wheel_with_api_and_both_cli_entrypoints(
     wheel = next(wheels.glob('*.whl'))
     assert wheel.name.startswith('benchset-9.8.7-')
     with zipfile.ZipFile(wheel) as package:
-        assert {'benchset/py.typed', 'benchset/reference.py', 'benchset/models.py'} <= set(package.namelist())
+        assert {'benchset/py.typed', 'benchset/reference.py', 'benchset/models.py',
+                'benchset/_metadata.py', 'benchset/_metadata.json'} <= set(package.namelist())
+        assert json.loads(package.read('benchset/_metadata.json'))['reference_machine']['cpu_cores'] == 4
     virtualenv = tmp_path / 'venv'
     venv.EnvBuilder(with_pip=True, symlinks=os.name != 'nt').create(virtualenv)
     python = virtualenv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')

@@ -2,6 +2,7 @@ include setup.py
 include Cargo.toml Cargo.lock rust-toolchain.toml LICENSE README.md
 recursive-include native *.rs
 include native/reference-calibration.json
+include benchset/_metadata.json
 recursive-include include *.h *.modulemap
 recursive-include scripts *.py
 recursive-include examples *.c *.rs *.swift

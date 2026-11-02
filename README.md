@@ -4,6 +4,18 @@ Sustained scalar CPU throughput, with an embeddable Rust core, a public C ABI,
 a Python library, a CLI, and a macOS Swift package. No Python interpreter is
 needed by applications embedding the native library.
 
+Rust is the single source of benchmark behavior: workloads, timing, validation,
+suite order and early stopping, scores and aggregation all live in the native
+core. Python and Swift are thin bindings to its C ABI. They handle language
+types, callbacks, signals and native-handle lifetimes without reimplementing
+benchmark rules. The C ABI supports both static and dynamic linking.
+
+Benchmark identities, default durations and calibration are also defined in
+Rust. Native builds generate the Python package's `_metadata.json` from those
+definitions; it is a generated data snapshot, not a second implementation.
+This keeps imports, metadata inspection and CLI help available without loading
+the native library. Update Rust sources rather than editing that snapshot.
+
 The initial suite contains **`single_core`** (one computational worker) and
 **`multi_core`** (all available computational workers). Both execute the same
 fixed mixed workload and return a score in **completed iterations per second**.
@@ -62,6 +74,9 @@ Completed result fields, including all measurement samples, are printed to
 stdout. Failed/cancelled results go to stderr. Exit codes: 0 completed, 1
 execution failure, 2 invalid CLI arguments, 130 interrupted/cancelled. The
 suite stops after a failed or cancelled benchmark.
+Duration validation loads the Rust library. If loading fails, that error takes
+precedence over invalid duration values and the CLI exits with code 1.
+Argument syntax, `--help` and `--version` do not require loading the library.
 Each result is flushed immediately, including when stdout is redirected.
 Progress fits the terminal width and is cleared before the result. Output
 uses `× pi` and `—` when the stream supports them, with `x pi` and `-` as
@@ -102,7 +117,7 @@ With the current two benchmarks this is mathematically
 independently of its worker count or measurement duration. The resulting
 multiplier is dimensionless; individual `score` fields remain iterations/s.
 
-The implementations use natural logarithms and `exp` on the original,
+The Rust core uses natural logarithms and `exp` on the original,
 unrounded double-precision ratios. Log space avoids intermediate overflow or
 underflow from multiplying ratios. Any consistent logarithm base and its
 inverse give the same mathematical result; ordinary floating-point rounding
@@ -118,6 +133,8 @@ A full score requires exactly `single_core` then `multi_core`, both with
 unstable results participate. After validating the complete set, any zero ratio
 makes the full score `0.0`. Zero is a valid score: check `is not None` in Python,
 `Some` in Rust, `if let` in Swift, or the presence flag in C.
+Native numeric validation rejects NaN and infinities without adding floating-point
+exception flags; flags already set by the caller are preserved.
 
 An incomplete, failed or cancelled suite has no aggregate: `None` in
 Python/Rust, `nil` in Swift, or a zero presence flag in C. When a benchmark
@@ -127,6 +144,7 @@ complete order, without duplicates or
 extra entries. Use `SuiteResult.from_results(tuple_of_results)` in Python,
 `SuiteResult::new(results)` in Rust, or `SuiteResult(results: results)` in Swift
 to calculate the aggregate from their stored individual Pi equivalents.
+The Python and Swift factories call the same Rust calculator through the C ABI.
 Python's direct `SuiteResult(results, aggregated_scores)` constructor stores
 the supplied fields; it does not calculate an aggregate.
 
@@ -141,6 +159,21 @@ restart for the next benchmark.
 
 Python 3.8–3.15, including free-threaded CPython, is supported. The wrapper uses
 standard-library `ctypes` and loads the version-matched bundled native library.
+`run`, `run_all` and `SuiteResult.from_results` require that native library,
+including when inputs are invalid or an aggregate is unavailable. A library
+loading or compatibility error takes precedence over benchmark argument
+validation. Argument checks and their diagnostics are supplied by Rust;
+Python still performs its ordinary numeric type conversions at the boundary.
+Integer subclass ratios are calculated from their `float(...)` conversions;
+Python comparison overrides are preserved. When aggregating a tuple subclass,
+the factory uses its actual stored elements and length, retaining the original
+tuple in `suite.results`.
+
+Benchmark names must be strings. A name subclass may customize an unknown-name
+diagnostic through Python's string operators; its result must also be a string,
+otherwise `TypeError` is raised before any benchmark starts. Compatibility
+covers the documented public API, not incidental dependency names imported by
+internal modules or the exact time temporary Python objects are finalized.
 
 ```python
 from benchset import run, run_all
@@ -373,6 +406,8 @@ Swift uses camelCase fields, such as `shortName`, `startedAtUnixSeconds` and
 `started_at` datetime; Swift offers `startedAt: Date` for the same instant.
 The frozen Python records use a tuple for results; Swift returns immutable
 value snapshots. Reading the Python globals does not load the native library.
+Their values come from the Rust-generated snapshot bundled with the package;
+builds refresh it from the same sources used to compile the native library.
 
 [Calibration values and provenance](native/reference-calibration.json) include
 the original kernel commit, binary SHA-256, raw pooled totals and series
@@ -402,7 +437,7 @@ pinned release toolchain described under [Publishing](#publishing).
 
 ```toml
 [dependencies]
-benchset = "0.0.6"
+benchset = "0.0.7"
 # For changes from a local source checkout, use:
 # benchset = { path = "../benchset" }
 ```
@@ -495,6 +530,12 @@ Check `suite.aggregated_scores.has_pi_equivalent` before reading its
 `benchset_suite_reason`. Use `benchset_suite_cancel` and `benchset_suite_free`
 for cancellation and cleanup. The same single-use and lifetime rules apply.
 
+`benchset_run_all_observed` additionally accepts a result callback for streaming
+each result before the next benchmark starts. Its child handle is borrowed only
+during that callback; copy diagnostics through the single-benchmark getters.
+Returning any nonzero value stops further benchmarks. Python and Swift bindings
+use this entry point; suite ordering and stopping remain in Rust.
+
 For example, using the initialized `config` above and no progress callback:
 
 ```c
@@ -562,7 +603,7 @@ the same repository. Rust is not required by the consumer.
 For a Swift manifest, add:
 
 ```swift
-.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.6"))
+.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.7"))
 ```
 
 Add `.product(name: "Benchset", package: "benchset")` to your target's
@@ -601,7 +642,9 @@ if let fullPi = suite.aggregatedScores.piEquivalent {
 ```
 
 `runAll` keeps the runner reserved across both benchmarks; cancellation also
-applies between its native handles. Native failure/cancellation returns the
+applies between benchmarks through the native suite's cancellation token.
+Both Swift `runAll` and Python `run_all` call the Rust suite runner through C.
+Native failure/cancellation returns the
 results obtained so far with a `nil` aggregate. Wrapper errors such as allocation
 failure or an unavailable native result throw `BenchsetError`; that call returns
 no `SuiteResult`.
@@ -677,6 +720,8 @@ controlled initialization failures instead of exhausting machine resources.
 Full-suite tests also cover complete ordering, geometric means of unrounded
 ratios, zero/invalid/extreme values, early stopping, serialization and the
 aggregate's presence in each public interface.
+The [core centralization regression matrix](tests/core-centralization-plan.md)
+maps the shared-core contracts to characterization tests and directed mutations.
 
 Python coverage includes statements and branches, including CLI subprocesses;
 CI installs a coverage startup hook for those subprocesses. Rust and Swift each

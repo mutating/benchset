@@ -1,5 +1,12 @@
 use super::*;
 
+/// Keep the existing public type path, including when users inspect nested types.
+/// Sharing the catalog must not move Benchmark's nominal definition into a module.
+#[test]
+fn public_benchmark_retains_root_type_path() {
+    assert_eq!(std::any::type_name::<Benchmark>(), "benchset::Benchmark");
+}
+
 fn completed(benchmark: Benchmark, ratio: f64) -> BenchmarkResult {
     let mut result = BenchmarkResult::failed(benchmark, Options::default(), String::new());
     result.status = Status::Completed;
@@ -86,6 +93,75 @@ fn incomplete_invalid_or_failed_suites_have_no_full_score() {
             .aggregated_scores
             .pi_equivalent
             .is_none());
+    }
+}
+
+/// Rejects unsuccessful status even when caller-built snapshots retain valid coefficients.
+/// Both positions prevent a missing status check from hiding behind absent-ratio validation.
+#[test]
+fn unsuccessful_results_with_present_ratios_have_no_aggregate() {
+    for status in [Status::Failed, Status::Cancelled] {
+        for position in 0..BENCHMARKS.len() {
+            let mut results = vec![
+                completed(Benchmark::SingleCore, 0.5),
+                completed(Benchmark::MultiCore, 2.0),
+            ];
+            results[position].status = status;
+            assert!(SuiteResult::new(results)
+                .aggregated_scores
+                .pi_equivalent
+                .is_none());
+        }
+    }
+}
+
+/// Checks every missing-ratio position independently, including both missing and zero beside absence.
+#[test]
+fn every_missing_ratio_prevents_aggregation() {
+    for positions in [&[0][..], &[1][..], &[0, 1][..]] {
+        let mut results = vec![
+            completed(Benchmark::SingleCore, 0.0),
+            completed(Benchmark::MultiCore, 2.0),
+        ];
+        for &position in positions {
+            results[position].pi_equivalent = None;
+        }
+        assert!(SuiteResult::new(results)
+            .aggregated_scores
+            .pi_equivalent
+            .is_none());
+    }
+}
+
+/// Retains true double endpoints in log space and canonicalizes a present negative zero at either position.
+#[test]
+fn aggregate_float_endpoints_and_negative_zero() {
+    let smallest = f64::from_bits(1);
+    for (single, multi, expected) in [
+        (f64::MAX, f64::MAX, f64::MAX),
+        (smallest, smallest, smallest),
+        (f64::MAX, smallest, f64::MAX.sqrt() * smallest.sqrt()),
+    ] {
+        let value = SuiteResult::new(vec![
+            completed(Benchmark::SingleCore, single),
+            completed(Benchmark::MultiCore, multi),
+        ])
+        .aggregated_scores
+        .pi_equivalent
+        .unwrap();
+        assert!((value / expected - 1.0).abs() < 1e-12);
+    }
+    for position in 0..2 {
+        let mut results = vec![
+            completed(Benchmark::SingleCore, 0.5),
+            completed(Benchmark::MultiCore, 2.0),
+        ];
+        results[position].pi_equivalent = Some(-0.0);
+        let value = SuiteResult::new(results)
+            .aggregated_scores
+            .pi_equivalent
+            .unwrap();
+        assert_eq!(value.to_bits(), 0.0_f64.to_bits());
     }
 }
 
