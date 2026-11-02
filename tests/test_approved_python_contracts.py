@@ -1,4 +1,4 @@
-"""Pin the explicitly chosen formatter and integer-normalization contracts."""
+"""Pin explicitly chosen host conversion, comparison and diagnostic contracts."""
 
 from typing import Any, List, Tuple, Type
 
@@ -254,3 +254,58 @@ def test_integer_float_conversion_errors_keep_identity_at_both_stages(
     assert caught.value is original
     assert calls == list(range(conversion + 1))
     assert events == (['float:0'] if conversion == 0 else ['float:0', 'ge', 'eq', 'float:1'])
+
+
+@pytest.mark.parametrize('source', ['property', 'status-comparison'])
+@pytest.mark.parametrize('position', [0, 1])
+@pytest.mark.parametrize('outcome', [True, False, ValueError, KeyboardInterrupt])
+def test_success_truth_is_evaluated_once(
+    source: str, position: int, outcome: Any,
+) -> None:
+    """Convert each requested success value to bool exactly once.
+
+    Both an overridden success property and an overridden status comparison
+    can return a stateful truth object. Do not retry false values, bypass its
+    bool conversion, duplicate the property read, or swallow its exception.
+    """
+    reads: List[str] = []
+    calls: List[str] = []
+    error = outcome('truth failed') if isinstance(outcome, type) else None
+
+    class Truth:
+        def __bool__(self) -> bool:
+            calls.append('bool')
+            assert len(calls) == 1
+            if error is not None:
+                raise error
+            return bool(outcome)
+
+    class Result(BenchmarkResult):
+        @property
+        def success(self) -> Any:
+            reads.append('success')
+            return Truth()
+
+    class Status(str):
+        __slots__ = ()
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> Any:
+            assert other == 'completed'
+            reads.append('success')
+            return Truth()
+
+    results = [BenchmarkResult(name, status='completed', pi_equivalent=value)
+               for name, value in zip(BENCHMARKS, (4.0, 9.0))]
+    results[position] = (Result if source == 'property' else BenchmarkResult)(
+        BENCHMARKS[position], status=Status('completed'), pi_equivalent=(4.0, 9.0)[position],
+    )
+    if error is not None:
+        with pytest.raises(type(error)) as caught:
+            SuiteResult.from_results(tuple(results))
+        assert caught.value is error
+    else:
+        score = SuiteResult.from_results(tuple(results)).aggregated_scores.pi_equivalent
+        assert score == (pytest.approx(6.0) if outcome else None)
+    assert reads == ['success']
+    assert calls == ['bool']

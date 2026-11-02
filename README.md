@@ -134,7 +134,9 @@ unstable results participate. After validating the complete set, any zero ratio
 makes the full score `0.0`. Zero is a valid score: check `is not None` in Python,
 `Some` in Rust, `if let` in Swift, or the presence flag in C.
 Native numeric validation rejects NaN and infinities without adding floating-point
-exception flags; flags already set by the caller are preserved.
+exception flags; flags already set by the caller are preserved. Native validation
+classifies the stored numeric value even when the FPU flushes subnormal numbers
+to zero; this also applies to duration validation in every language.
 
 An incomplete, failed or cancelled suite has no aggregate: `None` in
 Python/Rust, `nil` in Swift, or a zero presence flag in C. When a benchmark
@@ -165,7 +167,9 @@ loading or compatibility error takes precedence over benchmark argument
 validation. Argument checks and their diagnostics are supplied by Rust;
 Python still performs its ordinary numeric type conversions at the boundary.
 Integer subclass ratios are calculated from their `float(...)` conversions;
-Python comparison overrides are preserved. When aggregating a tuple subclass,
+Python aggregation retains Python comparisons, including their behavior under
+the caller's FPU mode and subclass overrides. Each requested `result.success`
+value is converted to `bool` once. When aggregating a tuple subclass,
 the factory uses its actual stored elements and length, retaining the original
 tuple in `suite.results`.
 
@@ -174,6 +178,7 @@ diagnostic through Python's string operators; its result must also be a string,
 otherwise `TypeError` is raised before any benchmark starts. Compatibility
 covers the documented public API, not incidental dependency names imported by
 internal modules or the exact time temporary Python objects are finalized.
+The CLI does not guarantee context-variable inheritance by its internal threads.
 
 ```python
 from benchset import run, run_all
