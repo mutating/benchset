@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple, Type, Union
 import pytest
 
 from benchset import BenchmarkRunner, Progress, api, run_all
+from tests.helpers import assert_runner_reusable
 
 
 class _Seconds(float):
@@ -253,10 +254,17 @@ def test_sigint_during_second_conversion_interrupts_caller_immediately(
 
 
 @pytest.mark.parametrize('second_signal', ['after-catching', 'finally'])
+@pytest.mark.parametrize('first_no_work', [False, True])
 def test_repeated_converter_sigint_preserves_default_exception_chain(
-    monkeypatch: pytest.MonkeyPatch, second_signal: str,
+    monkeypatch: pytest.MonkeyPatch, second_signal: str, first_no_work: bool,
 ) -> None:
-    """Each user-code SIGINT raises, retaining Python's normal exception replacement chain."""
+    """Each user-code SIGINT raises with Python's exception replacement chain.
+
+    Reach the second conversion even if scheduling starves the first window.
+    Retry only an exact no-work failure before any signal or second conversion;
+    the nanosecond control exercises this legitimate outcome deterministically.
+    No missing signal, wrong exception or malformed suite may be retried.
+    """
     events: List[str] = []
     raised: List[KeyboardInterrupt] = []
 
@@ -293,18 +301,35 @@ def test_repeated_converter_sigint_preserves_default_exception_chain(
     monkeypatch.setattr(api, 'BenchmarkRunner', lambda: runner)
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        with pytest.raises(KeyboardInterrupt) as caught:
-            run_all(warmup_seconds=Seconds('warmup', (0.0, 0.0), events),
-                    measurement_seconds=_Seconds('measurement', (0.1, AssertionError('unused measurement')), events))
+        caught: Optional[KeyboardInterrupt] = None
+        for attempt in range(3):
+            events.clear()
+            try:
+                suite = run_all(
+                    warmup_seconds=Seconds('warmup', (0.0, 0.0), events),
+                    measurement_seconds=_Seconds('measurement',
+                        (1e-9 if first_no_work and attempt == 0 else 0.1,
+                         AssertionError('unused measurement')), events),
+                )
+            except KeyboardInterrupt as error:
+                assert not (first_no_work and attempt == 0), 'The suite continued after a no-work failure'
+                caught = error
+                break
+            assert len(suite.results) == 1, suite
+            assert suite.results[0].status == 'failed', suite
+            assert suite.results[0].reason == 'measurement window was too short to complete any work', suite
+            assert events == ['warmup:1', 'measurement:1']
+            assert not raised
+        assert caught is not None, 'Could not reach the second conversion after three windows'
         assert len(raised) == 2
-        assert caught.value is raised[1]
+        assert caught is raised[1]
         assert raised[0].__context__ is None
-        assert caught.value.__context__ is (raised[0] if second_signal == 'finally' else None)
-        assert caught.value.__cause__ is None
+        assert caught.__context__ is (raised[0] if second_signal == 'finally' else None)
+        assert caught.__cause__ is None
         boundary = 'conversion-finally' if second_signal == 'finally' else 'after-first-signal'
         assert events == ['warmup:1', 'measurement:1', 'warmup:2', boundary]
         assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
-        assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.1).success
+        assert_runner_reusable(runner)
     finally:
         signal.signal(signal.SIGINT, previous)
 
