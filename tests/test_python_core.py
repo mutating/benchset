@@ -23,6 +23,7 @@ from benchset import (
     run_all,
 )
 from benchset._native import CSuiteResult, Native
+from tests.helpers import assert_runner_reusable
 from tests.test_semantics import ManagedNative, ResultLibrary
 
 
@@ -333,7 +334,7 @@ def test_real_native_cli_render_failure_releases_blocked_observer(
     assert cancellations
     assert all(cancellations)
     assert 'intermediate render failed' in capsys.readouterr().err
-    assert run('single_core', warmup_seconds=0, measurement_seconds=.02).success
+    assert_runner_reusable(BenchmarkRunner())
 
 
 @pytest.mark.parametrize(('name', 'warmup', 'measurement', 'reason'), [
@@ -356,7 +357,7 @@ def test_reentrant_invalid_request_keeps_validation_precedence(
     assert result.status == 'cancelled'
     assert failures
     assert all(item.reason == reason for item in failures)
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.02).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize('benchmark', ['single_core', 'multi_core'])
@@ -377,7 +378,7 @@ def test_suite_callback_failure_stops_notifications_and_keeps_completed_prefix(
         if value.benchmark == benchmark and value.phase == phase:
             raise error_type('suite callback failed')
 
-    suite = run_all(warmup_seconds=0, measurement_seconds=.03, on_progress=callback)
+    suite = run_all(warmup_seconds=0, measurement_seconds=.1, on_progress=callback)
     assert suite.results[-1].benchmark == benchmark
     assert suite.results[-1].status == 'failed'
     assert suite.results[-1].reason == f'progress callback failed: {error_type.__name__}: suite callback failed'
@@ -390,7 +391,7 @@ def test_suite_callback_failure_stops_notifications_and_keeps_completed_prefix(
         assert suite.results[0].success
     else:
         assert len(suite.results) == 1
-    assert run('single_core', warmup_seconds=0, measurement_seconds=.02).success
+    assert_runner_reusable(BenchmarkRunner())
 
 
 @pytest.mark.parametrize('trigger', ['error', 'cancel'])

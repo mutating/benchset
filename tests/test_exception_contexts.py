@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, NoReturn, Optional, Type
 import pytest
 
 from benchset import BenchmarkResult, BenchmarkRunner, SuiteResult, api, run_all
+from tests.helpers import assert_runner_reusable
 
 
 class _GuardExceptionAttributes:
@@ -104,7 +105,7 @@ def test_suite_second_conversion_keeps_caller_exception_graph(
                        measurement_seconds=Seconds(.1) if window == 'measurement' else .1)
 
     _check_exception_graph(operation, error_type, chain, guarded)
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize('phase', ['validation', 'execution'])
@@ -129,7 +130,7 @@ def test_name_matcher_keeps_caller_exception_graph(phase: str, chain: str, guard
         return runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
 
     _check_exception_graph(operation, ValueError, chain, guarded)
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize('primitive', ['success', 'ratio', 'name', 'ge', 'eq'])

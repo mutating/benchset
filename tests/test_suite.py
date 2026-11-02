@@ -22,7 +22,7 @@ from benchset import (
     cli,
     run_all,
 )
-from tests.helpers import mock_suite
+from tests.helpers import assert_runner_reusable, mock_suite
 
 
 def completed(name: str, equivalent: float) -> BenchmarkResult:
@@ -104,7 +104,7 @@ def test_aggregation_is_available_inside_active_benchmark_callbacks() -> None:
     result = runner.run('single_core', warmup_seconds=60, measurement_seconds=1, on_progress=progress)
     assert result.status == 'cancelled'
     assert aggregates == [1.0]
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.05).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize(('status', 'success', 'expected'), [
