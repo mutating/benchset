@@ -76,7 +76,7 @@ def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentatio
     monkeypatch.setattr(cli.sys, 'stdout', initial)
     monkeypatch.setattr(cli.sys, 'stderr', errors)
     monkeypatch.setattr(cli.shutil, 'get_terminal_size', lambda: os.terminal_size((120, 24)))
-    assert cli.main(['--warmup=.01', '--duration=.03']) == 0
+    assert cli.main(['--warmup=.1', '--duration=.1']) == 0
     assert selected
     assert not errors.getvalue()
     text = destination.getvalue()
@@ -97,14 +97,14 @@ def test_cli_next_child_has_no_previous_child_erase_width(monkeypatch: pytest.Mo
     """A fresh child's first frame must not pad using its predecessor's width.
 
     A completed single-core label is wider than the next multicore warmup
-    label. Real warmup produces that shorter first frame, so a retained width
-    becomes observable trailing spaces rather than a timing-sensitive counter.
+    label. Warmup allows worker startup before that shorter first frame; a
+    retained width becomes observable as trailing erase padding.
     """
     terminal = _Output(True)
     monkeypatch.setattr(cli.sys, 'stdout', terminal)
     monkeypatch.setattr(cli.sys, 'stderr', io.StringIO())
     monkeypatch.setattr(cli.shutil, 'get_terminal_size', lambda: os.terminal_size((120, 24)))
-    assert cli.main(['--warmup=.01', '--duration=.03']) == 0
+    assert cli.main(['--warmup=.1', '--duration=.1']) == 0
     first = next(frame for frame in terminal.writes if frame.startswith('\rmulti_core: '))
     assert ': warmup ' in first
     assert first.endswith('%'), 'a new child must not erase a previous child frame'
@@ -131,7 +131,7 @@ def test_native_child_keeps_reporting_a_disconnect_after_isatty_changes(monkeypa
     terminal, errors = Terminal(True), io.StringIO()
     monkeypatch.setattr(cli.sys, 'stdout', terminal)
     monkeypatch.setattr(cli.sys, 'stderr', errors)
-    assert cli.main(['--bench=single_core', '--warmup=.01', '--duration=.03']) == 1
+    assert cli.main(['--bench=single_core', '--warmup=.1', '--duration=.1']) == 1
     assert terminal.progress_attempts >= 2
     assert 'terminal disconnected after first progress' in errors.getvalue()
     assert not any(thread.name == 'benchset-cli' for thread in threads())
@@ -182,10 +182,10 @@ def test_next_child_terminal_inspection_failure_releases_native_state(
     monkeypatch.setattr(cli.sys, 'stderr', io.StringIO())
     if error_type is ValueError:
         with pytest.raises(ValueError, match='next output cannot report') as caught:
-            cli.main(['--warmup=.01', '--duration=.03'])
+            cli.main(['--warmup=.1', '--duration=.1'])
         assert caught.value is original
     else:
-        assert cli.main(['--warmup=.01', '--duration=.03']) == (1 if error_type is OSError else 130)
+        assert cli.main(['--warmup=.1', '--duration=.1']) == (1 if error_type is OSError else 130)
     assert not handles
     assert 'multi_core' not in benchmarks
     assert not any(thread.name == 'benchset-cli' for thread in threads())

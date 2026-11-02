@@ -30,16 +30,25 @@ from tests.helpers import mock_suite
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX pipe backpressure and subprocess SIGINT')
-@pytest.mark.parametrize('operation', ['render', 'flush', 'separator', 'pending'])
-def test_sigint_interrupts_blocked_intermediate_output(operation: str) -> None:
+@pytest.mark.parametrize(('delivery', 'operation'), [
+    ('process', 'render'), ('process', 'flush'), ('process', 'separator'), ('process', 'pending'),
+    ('eligible-worker', 'render'), ('eligible-worker', 'flush'), ('eligible-worker', 'separator'),
+])
+def test_sigint_interrupts_blocked_intermediate_output(operation: str, delivery: str) -> None:
     """Ctrl+C interrupts every intermediate output operation before native is acknowledged.
 
     Fill a real pipe and keep its reader open without draining it. A proxy routes
     exactly the selected output operation into that pipe; stderr synchronizes
     SIGINT delivery. Unbuffered child output isolates this from shutdown flushes.
     A signal pending before handler restoration must bypass stdout altogether.
+    The adversarial route selects the waiting worker when its mask permits it,
+    which POSIX also allows for process-directed SIGINT. A helper waits for the
+    main thread to enter write before delivery. It observes eligibility both
+    before publication and while waiting, detecting a late block or early
+    restore without depending on the kernel choosing a particular thread.
     """
     reader, writer = os.pipe()
+    command_reader, command_writer = os.pipe()
     process = None
     try:
         os.set_blocking(writer, False)
@@ -89,8 +98,38 @@ finally:
 assert signal.getsignal(signal.SIGINT) is previous
 raise SystemExit(status)
 '''
-        process = subprocess.Popen([sys.executable, '-u', '-c', program, operation],
-                                   stdout=writer, stderr=subprocess.PIPE, text=True)
+        if delivery == 'eligible-worker':
+            routing = r'''
+import os, queue, threading, time
+parked, waiting = threading.Event(), []
+class Messages(queue.Queue):
+    def put(self, *args, **kwargs):
+        waiting[:] = [threading.get_ident(), signal.SIGINT not in signal.pthread_sigmask(signal.SIG_BLOCK, [])]
+        return super().put(*args, **kwargs)
+class Acknowledgement(threading.Event):
+    def wait(self, timeout=None):
+        waiting[1] |= signal.SIGINT not in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        parked.set()
+        return super().wait(timeout)
+cli.Queue, cli.ResultEvent = Messages, Acknowledgement
+def deliver():
+    signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGINT])
+    if not os.read(int(sys.argv[2]), 1): return
+    assert parked.wait(5), 'observer never waited for acknowledgement'
+    main = threading.main_thread().ident
+    deadline = time.monotonic() + 5
+    while True:
+        frame = sys._current_frames().get(main)
+        if frame and frame.f_code is blocked_write.__code__ and frame.f_lineno == blocked_write.__code__.co_firstlineno + 3:
+            break
+        assert time.monotonic() < deadline, 'main thread never entered blocked write'
+        time.sleep(.001)
+    signal.pthread_kill(waiting[0] if waiting[1] else main, signal.SIGINT)
+threading.Thread(target=deliver, daemon=True).start()
+'''
+            program = program.replace('output = sys.stdout', routing + '\noutput = sys.stdout', 1)
+        process = subprocess.Popen([sys.executable, '-u', '-c', program, operation, str(command_reader)],
+                                   pass_fds=(command_reader,), stdout=writer, stderr=subprocess.PIPE, text=True)
         os.close(writer)
         writer = -1
         assert process.stderr is not None
@@ -103,7 +142,10 @@ raise SystemExit(status)
             return
         assert select.select([process.stderr], [], [], CLI_PROCESS_TIMEOUT)[0], 'output operation was never reached'
         assert process.stderr.readline() == 'blocked\n'
-        process.send_signal(signal.SIGINT)
+        if delivery == 'eligible-worker':
+            os.write(command_writer, b'!')
+        else:
+            process.send_signal(signal.SIGINT)
         assert process.wait(timeout=5) == 130
         assert not process.stderr.read()
     finally:
@@ -114,6 +156,8 @@ raise SystemExit(status)
         if writer >= 0:
             os.close(writer)
         os.close(reader)
+        os.close(command_reader)
+        os.close(command_writer)
 
 # Content checks allow slow interpreter startup on shared runners. Cancellation
 # and terminal-disconnect responsiveness retain their separate 5-second bounds.
@@ -1155,11 +1199,18 @@ def test_missing_stdout_still_redirects_a_broken_stderr_at_shutdown(
 def test_real_ctrl_c_cancels_each_phase_and_stops_the_suite(
     invocation: Tuple[List[str], Dict[str, str]], phase: str,
 ) -> None:
+    """Real terminal progress remains cancellable in either active phase.
+
+    Keep the five-second cancellation bound. A timeout requests a fatal Python
+    stack dump from the disposable child, exposing a blocked I/O or cleanup
+    thread instead of reporting an opaque process timeout on shared runners.
+    """
     import pty  # noqa: PLC0415
     import select  # noqa: PLC0415
     import time  # noqa: PLC0415
 
     command, environment = invocation
+    environment = dict(environment, PYTHONFAULTHANDLER='1')
     master, slave = pty.openpty()
     process = subprocess.Popen([*command, '--warmup', '20' if phase == 'warmup' else '0',
                                 '--duration', '20'], env=environment, stdout=slave,
@@ -1174,7 +1225,12 @@ def test_real_ctrl_c_cancels_each_phase_and_stops_the_suite(
                 observed += os.read(master, 4096)
         assert phase.encode() in observed
         process.send_signal(signal.SIGINT)
-        _output, errors = process.communicate(timeout=5)
+        try:
+            _output, errors = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.send_signal(signal.SIGABRT)
+            _output, diagnostic = process.communicate(timeout=5)
+            pytest.fail('CLI did not finish cancellation within five seconds:\n' + diagnostic)
         assert process.returncode == 130
         assert 'cancelled' in errors
         assert 'Traceback' not in errors

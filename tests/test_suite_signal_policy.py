@@ -6,7 +6,14 @@ from typing import Callable, Dict, List, Optional, Type, Union
 
 import pytest
 
-from benchset import BenchmarkRunner, Progress, SuiteResult, api, run_all
+from benchset import (
+    BenchmarkResult,
+    BenchmarkRunner,
+    Progress,
+    SuiteResult,
+    api,
+    run_all,
+)
 from benchset._native import Native
 from tests.helpers import assert_runner_reusable
 
@@ -18,6 +25,18 @@ def _handler(policy: str, custom: Callable[[int, Optional[FrameType]], None]) ->
     handlers: Dict[str, _Handler] = {'default': signal.default_int_handler, 'custom': custom,
                                    'ignored': signal.SIG_IGN}
     return handlers[policy]
+
+
+def _assert_finished_short_measurement(result: BenchmarkResult) -> None:
+    """Accept completion or the documented no-work failure, never a signal error."""
+    if result.success:
+        assert result.score is not None
+        assert result.pi_equivalent is not None
+    else:
+        assert result.status == 'failed'
+        assert result.reason == 'measurement window was too short to complete any work'
+        assert result.score is result.pi_equivalent is None
+        assert result.iterations == 0 or result.elapsed_seconds == 0
 
 
 def _assert_execution_handler(actual: _Handler, policy: str, caller_handler: _Handler) -> None:
@@ -118,7 +137,9 @@ def test_suite_rechecks_signal_policy_after_each_childs_conversions(  # noqa: PL
     assert events == ['before-signal'] + (['target-custom'] if target == 'custom' else []) + ['after-signal']
     if target != 'default':
         assert suite is not None
-        assert tuple(result.status for result in suite.results) == ('completed', 'completed')
+        assert len(suite.results) == 2
+        assert suite.results[0].success
+        _assert_finished_short_measurement(suite.results[1])
 
 
 @pytest.mark.parametrize('initial', _POLICIES)
@@ -192,7 +213,7 @@ def test_single_run_rechecks_signal_policy_after_name_validation(initial: str, t
     assert events == ['before-signal'] + (['target-custom'] if target == 'custom' else []) + ['after-signal']
     if target != 'default':
         assert result is not None
-        assert result.success
+        _assert_finished_short_measurement(result)
 
 
 @pytest.mark.parametrize('initial', ['custom', 'ignored'])

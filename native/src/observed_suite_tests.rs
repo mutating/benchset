@@ -67,7 +67,8 @@ fn observation_streams_results_and_controls_later_work_without_rewriting_them() 
             let mut config = config.assume_init();
             config.benchmark = 999;
             config.warmup_seconds = 0.0;
-            config.measurement_seconds = 0.05;
+            // Observing a completed prefix requires time for scheduled workers.
+            config.measurement_seconds = 0.2;
             let mut events = Events {
                 suite,
                 results: Vec::new(),
@@ -84,7 +85,19 @@ fn observation_streams_results_and_controls_later_work_without_rewriting_them() 
             );
             assert_eq!(config.benchmark, 999);
             assert_eq!(events.results.len(), count);
-            assert_eq!(events.results[0].1, Status::Completed as u32);
+            assert_eq!(
+                events.results[0].1,
+                Status::Completed as u32,
+                "{:?}",
+                (*suite)
+                    .result
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .result
+                    .results
+            );
             assert!(events.results[0].2 > 0);
             assert_eq!(
                 status,

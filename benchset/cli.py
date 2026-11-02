@@ -260,9 +260,16 @@ def _main(argv: Optional[List[str]]) -> int:  # noqa: PLR0915 — Keep signal/wo
     def publish(result: BenchmarkResult) -> bool:
         if aborted or (argument_errors and not interrupted):
             return True
-        messages.put(result)
-        resume.wait()
-        resume.clear()
+        # A parked observer must not consume the signal interrupting main's I/O.
+        mask = getattr(signal, 'pthread_sigmask', None)
+        previous_mask = mask(signal.SIG_BLOCK, {signal.SIGINT}) if mask is not None else None
+        try:
+            messages.put(result)
+            resume.wait()
+            resume.clear()
+        finally:
+            if mask is not None:
+                mask(signal.SIG_SETMASK, previous_mask)
         return interrupted or aborted
 
     def execute() -> None:

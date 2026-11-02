@@ -32,15 +32,17 @@ def test_cli_restores_its_entry_policy_after_a_caller_changes_sigint_during_nati
 ) -> None:
     """Native-work changes do not become output-phase caller policy selections.
 
-    A real progress callback raises SIGUSR1 and waits until its main-thread
-    handler selects another SIGINT policy. No SIGINT or output callback changes
+    A real progress callback requests SIGUSR1 and waits until its main-thread
+    handler selects another SIGINT policy. Deliver it after the wait condition
+    has released its lock, so CPython wait internals cannot replace the caller
+    exception while reacquiring that lock. No SIGINT or output callback changes
     that policy. HEAD restored its entry handler before rendering each result;
     the shared-suite cleanup must retain that scope while preserving the
     separate, approved policy changes made during intermediate output. A caller
     error after the selection also exercises cleanup while an error unwinds.
     """
     runner = BenchmarkRunner()
-    changed = Event()
+    changed, requested = Event(), Event()
     sent = False
     signals: List[str] = []
     rendering: List[Tuple[str, _Handler]] = []
@@ -67,9 +69,17 @@ def test_cli_restores_its_entry_policy_after_a_caller_changes_sigint_during_nati
             nonlocal sent
             if value.benchmark == changed_child and not sent:
                 sent = True
-                signal.raise_signal(signal.SIGUSR1)
+                requested.set()
                 assert changed.wait(5), 'main thread did not select the caller policy'
             super().__call__(value)
+
+    class MainWait(Event):
+        def wait(self, timeout: Optional[float] = None) -> bool:
+            value = super().wait(timeout)
+            if requested.is_set():
+                requested.clear()
+                signal.raise_signal(signal.SIGUSR1)
+            return value
 
     class Worker(Thread):
         def __init__(self, *arguments: Any, **options: Any) -> None:
@@ -85,6 +95,7 @@ def test_cli_restores_its_entry_policy_after_a_caller_changes_sigint_during_nati
     monkeypatch.setattr(cli, 'BenchmarkRunner', lambda: runner)
     monkeypatch.setattr(cli, '_Progress', Observer)
     monkeypatch.setattr(cli, 'Thread', Worker)
+    monkeypatch.setattr(cli, 'Event', MainWait)
     monkeypatch.setattr(cli, 'render', observe_render)
     previous = signal.signal(signal.SIGINT, entry_handler)
     previous_usr = signal.signal(signal.SIGUSR1, select_policy)
