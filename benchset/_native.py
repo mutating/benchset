@@ -45,7 +45,10 @@ def _load_library(path: str) -> _CDLL:
     if sys.platform == 'win32':
         path = abspath(path)  # noqa: PTH100 — Match CDLL without resolving symlinks.
         mode = 0x1100  # CDLL's LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.
-    handle = cast(Any, ctypes)._dlopen(path, mode)
+    opener = getattr(ctypes, '_dlopen', None)
+    if opener is None:
+        opener = getattr(_ctypes, 'LoadLibrary' if sys.platform == 'win32' else 'dlopen')
+    handle = opener(path, mode)
     try:
         factory = cast(Any, ctypes.cdll)._dlltype
         return cast(_CDLL, (_Library if factory is _CDLL else factory)(path, handle=handle))

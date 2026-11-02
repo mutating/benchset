@@ -52,7 +52,7 @@ def test_failed_native_loads_do_not_accumulate_function_types(monkeypatch: pytes
     def missing(_path: object, _mode: int) -> int:
         raise OSError('missing Rust image')
 
-    monkeypatch.setattr(ctypes, '_dlopen', missing)
+    monkeypatch.setattr(ctypes, '_dlopen', missing, raising=False)
     gc.collect()
     baseline = _function_type_count()
     for _batch in range(3):
@@ -65,7 +65,7 @@ def test_failed_native_loads_do_not_accumulate_function_types(monkeypatch: pytes
 def test_standard_loader_retries_failures_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Failures are retried as fresh attempts so a subsequently available Rust image can load."""
     _clear_standard_loader()
-    original_open = vars(ctypes)['_dlopen']
+    original_open = cast(Any, getattr(ctypes, '_dlopen', getattr(_ctypes, 'LoadLibrary', None)))
     attempts = 0
 
     def open_after_two_failures(path: Any, mode: int) -> int:
@@ -75,7 +75,7 @@ def test_standard_loader_retries_failures_and_recovers(monkeypatch: pytest.Monke
             raise OSError('transient load failure ' + str(attempts))
         return cast(int, original_open(path, mode))
 
-    monkeypatch.setattr(ctypes, '_dlopen', open_after_two_failures)
+    monkeypatch.setattr(ctypes, '_dlopen', open_after_two_failures, raising=False)
     for attempt in (1, 2):
         with pytest.raises(OSError, match='transient load failure ' + str(attempt)):
             Native()
@@ -94,7 +94,7 @@ def test_standard_loader_preflights_and_adopts_the_open_handle(monkeypatch: pyte
     if loader is None:
         pytest.skip('HEAD has no standard loader helper')
     loader.cache_clear()
-    original_open = vars(ctypes)['_dlopen']
+    original_open = cast(Any, getattr(ctypes, '_dlopen', getattr(_ctypes, 'LoadLibrary', None)))
     original_initialize = ctypes.CDLL.__init__
     calls: List[Tuple[str, object, object]] = []
 
@@ -107,7 +107,7 @@ def test_standard_loader_preflights_and_adopts_the_open_handle(monkeypatch: pyte
         calls.append(('wrapper', name, kwargs.get('handle')))
         original_initialize(library, name, *args, **kwargs)
 
-    monkeypatch.setattr(ctypes, '_dlopen', observe_open)
+    monkeypatch.setattr(ctypes, '_dlopen', observe_open, raising=False)
     monkeypatch.setattr(ctypes.CDLL, '__init__', initialize)
     path = _library_path()
     library = loader(path)
@@ -123,14 +123,14 @@ def test_cold_native_opens_the_real_image_once_and_reuses_it(monkeypatch: pytest
     image while configuring its own function objects. No fake handle is called.
     """
     _clear_standard_loader()
-    original_open = vars(ctypes)['_dlopen']
+    original_open = cast(Any, getattr(ctypes, '_dlopen', getattr(_ctypes, 'LoadLibrary', None)))
     calls: List[Tuple[str, int]] = []
 
     def observe_open(path: str, mode: int) -> int:
         calls.append((path, mode))
         return cast(int, original_open(path, mode))
 
-    monkeypatch.setattr(ctypes, '_dlopen', observe_open)
+    monkeypatch.setattr(ctypes, '_dlopen', observe_open, raising=False)
     first, second = Native(), Native()
     assert first.lib.benchset_abi_version() == second.lib.benchset_abi_version() == ABI_VERSION
     assert first.lib._library is second.lib._library
@@ -170,7 +170,7 @@ def test_modern_cdll_hook_adopts_the_preopened_handle_without_reopening(
         library._handle = library._load_library(name, ctypes.DEFAULT_MODE, handle, None)
 
     monkeypatch.setattr(_native, 'sys', SimpleNamespace(platform=platform))
-    monkeypatch.setattr(ctypes, '_dlopen', open_image)
+    monkeypatch.setattr(ctypes, '_dlopen', open_image, raising=False)
     monkeypatch.setattr(canonical, '_load_library', reopen, raising=False)
     monkeypatch.setattr(canonical, '__init__', initialize)
     requested = 'subdir/../adoption-probe.dll'
@@ -212,14 +212,17 @@ def test_address_bound_real_symbol_keeps_library_owner_alive() -> None:
 
 
 @pytest.mark.parametrize('platform', ['darwin', 'linux', 'win32'])
+@pytest.mark.parametrize('alias_present', [True, False])
 def test_standard_loader_keeps_platform_modes_and_normalizes_windows_path(
-    monkeypatch: pytest.MonkeyPatch, platform: str,
+    monkeypatch: pytest.MonkeyPatch, platform: str, alias_present: bool,
 ) -> None:
     """Exercise platform loading rules on every host without loading a foreign binary.
 
     Spies provide a handle and its wrapper; simulated Windows must normalize
     the relative path exactly as CDLL does and keep its secure search flags.
-    Both POSIX variants keep the path and DEFAULT_MODE unchanged.
+    Both POSIX variants keep the path and DEFAULT_MODE unchanged. Removing
+    ctypes' legacy alias reproduces modern Windows: the raw platform opener
+    must still work without changing ownership, paths or search flags.
     """
     loader = getattr(_native, '_load_library', None)
     if loader is None:
@@ -237,7 +240,12 @@ def test_standard_loader_keeps_platform_modes_and_normalizes_windows_path(
         return result
 
     monkeypatch.setattr(_native, 'sys', SimpleNamespace(platform=platform))
-    monkeypatch.setattr(ctypes, '_dlopen', open_image)
+    if alias_present:
+        monkeypatch.setattr(ctypes, '_dlopen', open_image, raising=False)
+    else:
+        monkeypatch.delattr(ctypes, '_dlopen', raising=False)
+        monkeypatch.setattr(_ctypes, 'LoadLibrary' if platform == 'win32' else 'dlopen',
+                            open_image, raising=False)
     monkeypatch.setattr(ctypes.cdll, '_dlltype', construct)
     requested = 'subdir/../benchset.dll'
     expected_path = os.path.abspath(requested) if platform == 'win32' else requested  # noqa: PTH100 — Match CDLL without resolving symlinks.
@@ -291,7 +299,7 @@ def test_failed_wrapper_adoption_closes_only_its_open_handle_and_retries(  # noq
         calls.append(('FreeLibrary', handle))
 
     monkeypatch.setattr(_native, 'sys', SimpleNamespace(platform=platform))
-    monkeypatch.setattr(ctypes, '_dlopen', open_image)
+    monkeypatch.setattr(ctypes, '_dlopen', open_image, raising=False)
     monkeypatch.setattr(ctypes.cdll, '_dlltype', construct)
     monkeypatch.setattr(_ctypes, 'dlclose', close_posix, raising=False)
     monkeypatch.setattr(_ctypes, 'FreeLibrary', close_windows, raising=False)
@@ -361,7 +369,7 @@ def test_failed_raw_open_never_constructs_or_closes_a_wrapper(
         calls.append(('FreeLibrary', handle))
 
     monkeypatch.setattr(_native, 'sys', SimpleNamespace(platform=platform))
-    monkeypatch.setattr(ctypes, '_dlopen', open_image)
+    monkeypatch.setattr(ctypes, '_dlopen', open_image, raising=False)
     monkeypatch.setattr(ctypes.cdll, '_dlltype', construct)
     monkeypatch.setattr(_ctypes, 'dlclose', close_posix, raising=False)
     monkeypatch.setattr(_ctypes, 'FreeLibrary', close_windows, raising=False)

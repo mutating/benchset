@@ -1,6 +1,7 @@
 """Reject invalid numeric snapshots without disturbing the caller's FPU state."""
 
 import ctypes
+import gc
 import math
 import os
 import shutil
@@ -69,14 +70,20 @@ def quiet_environment(tmp_path_factory: pytest.TempPathFactory) -> Any:
 
 @contextmanager
 def quiet_flags(probe: Any, seed: bool) -> Iterator[int]:
+    # CPython 3.15 GC statistics set FE_INEXACT independently of validation.
+    collecting = gc.isenabled()
+    gc.disable()
     before = probe.rounding(), probe.flags()
-    assert probe.begin(seed) == 0
-    initial = probe.flags()
     try:
-        yield initial
+        assert probe.begin(seed) == 0
+        yield probe.flags()
     finally:
-        assert probe.end() == 0
-        assert (probe.rounding(), probe.flags()) == before
+        try:
+            assert probe.end() == 0
+            assert (probe.rounding(), probe.flags()) == before
+        finally:
+            if collecting:
+                gc.enable()
 
 
 def number(bits: int) -> float:
@@ -219,8 +226,9 @@ def test_finite_controls_and_negative_zero_remain_accepted_by_duration_validatio
     deliberately checks the public numeric range independently of conversion.
     """
     native = _native.Native()
+    warmup, measurement = native.double(number(bits)), native.double(1.0)
     with quiet_flags(quiet_environment, True) as initial:
-        code = native.lib.benchset_duration_error(native.double(number(bits)), native.double(1.0))
+        code = native.lib.benchset_duration_error(warmup, measurement)
         flags = quiet_environment.flags()
     assert code == 0
     assert flags == initial

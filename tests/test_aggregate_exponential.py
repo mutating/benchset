@@ -63,13 +63,21 @@ double geometric(double first, double second) {
 
 @contextmanager
 def rounding(probe: Any, mode: int) -> Iterator[None]:
+    # CPython 3.15 GC timing statistics can set FE_INEXACT. Keep unrelated
+    # automatic collection outside the measured numeric operation.
+    collecting = gc.isenabled()
+    gc.disable()
     before = probe.rounding(), probe.flags()
-    assert probe.begin(mode) == 0
     try:
+        assert probe.begin(mode) == 0
         yield
     finally:
-        assert probe.end() == 0
-        assert (probe.rounding(), probe.flags()) == before
+        try:
+            assert probe.end() == 0
+            assert (probe.rounding(), probe.flags()) == before
+        finally:
+            if collecting:
+                gc.enable()
 
 
 def prepared_native(monkeypatch: pytest.MonkeyPatch) -> _native.Native:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
-from distutils.errors import DistutilsFileError
+from distutils.errors import DistutilsFileError  # type: ignore[import-not-found]
 from pathlib import Path
 from typing import Any, Dict, Tuple
 

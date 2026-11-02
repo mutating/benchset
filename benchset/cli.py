@@ -388,7 +388,7 @@ def _main(argv: Optional[List[str]]) -> int:  # noqa: PLR0915 — Keep signal/wo
                             break
         finally:
             if guard_errors:
-                _raise_original(guard_errors.pop())
+                _raise_original(guard_errors.pop())  # pragma: no branch — This NoReturn call has no normal successor (Python 3.8).
     if argument_errors and not interrupted:
         try:
             parser.error(argument_errors[0])

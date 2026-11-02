@@ -61,6 +61,9 @@ def test_invalid_cli_ranges_keep_priority_over_terminal_query_failures(  # noqa:
     diagnostic. Native is real; handle auditing and runner reuse check that the
     rejection leaves neither an active worker nor a partially initialized run.
     """
+    # New argparse versions probe stdout while deciding whether to use colors;
+    # isolate the later progress-query boundary this test exercises.
+    monkeypatch.setenv('NO_COLOR', '1')
     runner = BenchmarkRunner()
     created, freed = _audit_handles(monkeypatch)
     output, errors = _Output(error_type('terminal query failed')), io.StringIO()
@@ -98,6 +101,9 @@ def test_valid_cli_ranges_preserve_the_original_terminal_query_error_boundary(
     130. Other ordinary/control exceptions retain their exact original object.
     No benchmark may start just to decide which error should be reported.
     """
+    # New argparse versions probe stdout while deciding whether to use colors;
+    # isolate the later progress-query boundary this test exercises.
+    monkeypatch.setenv('NO_COLOR', '1')
     runner = BenchmarkRunner()
     created, freed = _audit_handles(monkeypatch)
     original = error_type('terminal query failed')

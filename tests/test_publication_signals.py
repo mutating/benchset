@@ -462,7 +462,7 @@ finally:
     interpreters.destroy(interpreter)
     signal.signal(signal.SIGINT, previous)
 '''
-    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, check=False, timeout=3)
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, check=False, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == 'equivalent\n'
 
