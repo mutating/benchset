@@ -101,7 +101,7 @@ raise SystemExit(status)
             assert 'Full Pi equivalent :' in diagnostics
             assert 'blocked' not in diagnostics
             return
-        assert select.select([process.stderr], [], [], 5)[0], 'output operation was never reached'
+        assert select.select([process.stderr], [], [], CLI_PROCESS_TIMEOUT)[0], 'output operation was never reached'
         assert process.stderr.readline() == 'blocked\n'
         process.send_signal(signal.SIGINT)
         assert process.wait(timeout=5) == 130
