@@ -3,7 +3,7 @@
 import io
 import os
 from threading import enumerate as threads
-from typing import Callable, List, Optional, Type
+from typing import Callable, List, Optional, Tuple, Type
 
 import pytest
 
@@ -48,8 +48,9 @@ class _Output(io.StringIO):
 @pytest.mark.parametrize('initial_terminal', [False, True])
 @pytest.mark.parametrize('replace_stream', [False, True])
 @pytest.mark.parametrize('boundary', ['write', 'flush', 'separator'])
+@pytest.mark.parametrize('warmup', [0.0, 0.1])
 def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentation(
-    monkeypatch: pytest.MonkeyPatch, initial_terminal: bool, replace_stream: bool, boundary: str,
+    monkeypatch: pytest.MonkeyPatch, initial_terminal: bool, replace_stream: bool, boundary: str, warmup: float,
 ) -> None:
     """Recapture terminal status after result write/flush and separator output.
 
@@ -57,11 +58,20 @@ def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentatio
     the caller replaces stdout or changes that stream's isatty result. The next
     child must emit progress only for its own terminal, and a text destination
     must receive neither progress frames nor an earlier child's erase sequence.
+    Inspect policy at the first callback, regardless of its phase: zero warmup
+    or a descheduled coordinator can legitimately start with measurement.
     """
     initial = _Output(initial_terminal)
     destination = _Output(not initial_terminal) if replace_stream else initial
     initial.boundary = boundary
     selected = False
+    first_callback: List[Tuple[Progress, bool, bool, int]] = []
+    present = cli._Progress.__call__
+
+    def observe(self: cli._Progress, value: Progress) -> None:
+        if value.benchmark == 'multi_core' and not first_callback:
+            first_callback.append((value, self.terminal, cli.sys.stdout is destination, self.width))
+        present(self, value)
 
     def select() -> None:
         nonlocal selected
@@ -75,10 +85,15 @@ def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentatio
     errors = io.StringIO()
     monkeypatch.setattr(cli.sys, 'stdout', initial)
     monkeypatch.setattr(cli.sys, 'stderr', errors)
-    monkeypatch.setattr(cli.shutil, 'get_terminal_size', lambda: os.terminal_size((120, 24)))
-    assert cli.main(['--warmup=.1', '--duration=.1']) == 0
+    monkeypatch.setattr(cli.shutil, 'get_terminal_size', lambda *_args, **_kwargs: os.terminal_size((120, 24)))
+    monkeypatch.setattr(cli._Progress, '__call__', observe)
+    assert cli.main([f'--warmup={warmup}', '--duration=.2']) == 0, errors.getvalue()
     assert selected
     assert not errors.getvalue()
+    value, terminal, current_stream, width = first_callback[0]
+    assert terminal is not initial_terminal
+    assert current_stream
+    assert width == 0
     text = destination.getvalue()
     if not replace_stream:
         text = text[text.index('Benchmark'):]
@@ -88,7 +103,7 @@ def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentatio
     else:
         assert '\rmulti_core: ' in text
         first = next(frame for frame in destination.writes if frame.startswith('\rmulti_core: '))
-        assert ': warmup ' in first, 'refresh must precede the next child\'s first frame'
+        assert f': {value.phase} ' in first
     assert not any(thread.name == 'benchset-cli' for thread in threads())
     assert_runner_reusable(BenchmarkRunner())
 
@@ -96,17 +111,26 @@ def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentatio
 def test_cli_next_child_has_no_previous_child_erase_width(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh child's first frame must not pad using its predecessor's width.
 
-    A completed single-core label is wider than the next multicore warmup
-    label. Warmup allows worker startup before that shorter first frame; a
-    retained width becomes observable as trailing erase padding.
+    Observe width before rendering the next child's first callback, even if
+    scheduling skips its warmup. This catches stale state when measurement's
+    wider label would otherwise conceal the unwanted erase width.
     """
     terminal = _Output(True)
     monkeypatch.setattr(cli.sys, 'stdout', terminal)
     monkeypatch.setattr(cli.sys, 'stderr', io.StringIO())
-    monkeypatch.setattr(cli.shutil, 'get_terminal_size', lambda: os.terminal_size((120, 24)))
-    assert cli.main(['--warmup=.1', '--duration=.1']) == 0
+    monkeypatch.setattr(cli.shutil, 'get_terminal_size', lambda *_args, **_kwargs: os.terminal_size((120, 24)))
+    widths: List[int] = []
+    present = cli._Progress.__call__
+
+    def observe(self: cli._Progress, value: Progress) -> None:
+        if value.benchmark == 'multi_core' and not widths:
+            widths.append(self.width)
+        present(self, value)
+
+    monkeypatch.setattr(cli._Progress, '__call__', observe)
+    assert cli.main(['--warmup=0', '--duration=.2']) == 0
+    assert widths == [0]
     first = next(frame for frame in terminal.writes if frame.startswith('\rmulti_core: '))
-    assert ': warmup ' in first
     assert first.endswith('%'), 'a new child must not erase a previous child frame'
 
 

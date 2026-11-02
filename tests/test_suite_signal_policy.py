@@ -219,8 +219,9 @@ def test_single_run_rechecks_signal_policy_after_name_validation(initial: str, t
 @pytest.mark.parametrize('initial', ['custom', 'ignored'])
 @pytest.mark.parametrize('window', ['warmup', 'measurement'])
 @pytest.mark.parametrize('error_type', [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize('first_no_work', [False, True])
 def test_new_default_policy_protects_cleanup_after_a_converter_raises(
-    monkeypatch: pytest.MonkeyPatch, initial: str, window: str, error_type: Type[BaseException],
+    monkeypatch: pytest.MonkeyPatch, initial: str, window: str, error_type: Type[BaseException], first_no_work: bool,
 ) -> None:
     """A converter's newly selected default policy also applies during cleanup.
 
@@ -228,6 +229,8 @@ def test_new_default_policy_protects_cleanup_after_a_converter_raises(
     its handle and must defer a cleanup SIGINT without replacing the caller's
     original error or leaving activity behind. The free hook always completes
     real native freeing, including when a broken signal policy raises there.
+    A nanosecond control pins retries of an exact no-work first result before
+    the target conversion; no signal, cleanup error or later result is retried.
     """
     runner = BenchmarkRunner()
     monkeypatch.setattr(api, 'BenchmarkRunner', lambda: runner)
@@ -242,7 +245,8 @@ def test_new_default_policy_protects_cleanup_after_a_converter_raises(
 
     class Seconds(float):
         def __new__(cls, field: str) -> 'Seconds':
-            return super().__new__(cls, 0.0 if field == 'warmup' else .01)
+            return super().__new__(cls, 0.0 if field == 'warmup' else
+                                   (1e-9 if first_no_work and attempt == 0 else .1))
 
         def __init__(self, field: str) -> None:
             self.field = field
@@ -269,12 +273,22 @@ def test_new_default_policy_protects_cleanup_after_a_converter_raises(
     previous = signal.signal(signal.SIGINT, _handler(initial, custom))
     caught: Optional[BaseException] = None
     try:
-        try:
-            run_all(warmup_seconds=Seconds('warmup'), measurement_seconds=Seconds('measurement'))
-        except BaseException as error:  # noqa: BLE001 — Compare every possible replacement with the exact caller error.
-            caught = error
+        for attempt in range(3):
+            conversions = {'warmup': 0, 'measurement': 0}
+            try:
+                suite = run_all(warmup_seconds=Seconds('warmup'), measurement_seconds=Seconds('measurement'))
+            except BaseException as error:  # noqa: BLE001 — Compare every replacement with the exact caller error.
+                assert not (first_no_work and attempt == 0), 'The suite continued after a no-work failure'
+                caught = error
+                break
+            assert len(suite.results) == 1, suite
+            assert suite.results[0].status == 'failed', suite
+            assert suite.results[0].reason == 'measurement window was too short to complete any work', suite
+            assert conversions == {'warmup': 1, 'measurement': 1}
+            assert not raised
+            assert cleanup_signals == 0
         raised = False
-        assert caught is original
+        assert caught is original, (caught, conversions, cleanup_signals)
         assert caught.__context__ is None
         assert cleanup_signals == (1 if hasattr(Native, 'execute_suite') else 0)
         assert signal.getsignal(signal.SIGINT) is signal.default_int_handler

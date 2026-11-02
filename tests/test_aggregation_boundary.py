@@ -1,6 +1,7 @@
 """Field-preserving transport for caller-built full-suite snapshots."""
 
 import ctypes
+import gc
 import os
 import shutil
 import subprocess
@@ -112,6 +113,8 @@ def test_zero_aggregate_preserves_floating_environment(
     environment in a finally block. An existing FE_INVALID flag must survive,
     while neither log(0)'s divide-by-zero nor log(other)'s inexact flag may appear.
     Native bindings are prepared first to keep loader activity outside the probe.
+    Disable automatic GC during measurement: CPython 3.15 collection statistics
+    independently set FE_INEXACT and must not be attributed to the calculator.
     """
     compiler = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
     if compiler is None:
@@ -140,12 +143,18 @@ int end(void) { return fesetenv(&saved); }
     results = [BenchmarkResult('single_core', status='completed', pi_equivalent=other),
                BenchmarkResult('multi_core', status='completed', pi_equivalent=other)]
     results[position] = replace(results[position], pi_equivalent=-0.0)
-    initial = probe.begin()
+    collecting = gc.isenabled()
+    gc.disable()
     try:
-        value = SuiteResult.from_results(tuple(results)).aggregated_scores.pi_equivalent
-        observed = probe.flags()
+        initial = probe.begin()
+        try:
+            value = SuiteResult.from_results(tuple(results)).aggregated_scores.pi_equivalent
+            observed = probe.flags()
+        finally:
+            restored = probe.end()
     finally:
-        restored = probe.end()
+        if collecting:
+            gc.enable()
     assert initial >= 0
     assert restored == 0
     assert value == 0.0
