@@ -8,6 +8,7 @@ import pytest
 
 from benchset import BenchmarkRunner, cli
 from benchset._native import Native
+from tests.helpers import assert_runner_reusable
 
 
 @pytest.mark.parametrize('benchmark', ['single_core', 'all'])
@@ -283,3 +284,60 @@ def test_standalone_settings_retains_the_optional_loading_and_inspection_error_f
     assert config.duration == -1.0
     assert calls == (['loading'] if stage == 'loading' else ['loading', 'inspection'])
     assert capsys.readouterr() == ('', '')
+
+
+def test_cli_defers_intermediate_output_if_cancelled_while_releasing_its_signal_handler(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Cancellation just before output handoff must defer rendering until join.
+
+    Invoke the still-owned handler synchronously inside its replacement call.
+    This selects the narrow pre-installation window on Windows as well as POSIX,
+    without relying on OS signal delivery or scheduler timing. Real native work
+    must finish cleanup before any result is rendered, and the runner stays reusable.
+    """
+    runner = BenchmarkRunner()
+    joined = fired = False
+    rendered: List[bool] = []
+    install, render = signal.signal, cli.render
+
+    def replace(signum: int, handler: Any) -> Any:
+        nonlocal fired
+        if not fired and getattr(handler, '__name__', '') == 'interrupt_output':
+            fired = True
+            previous = signal.getsignal(signum)
+            assert callable(previous)
+            previous(signum, None)
+        return install(signum, handler)
+
+    class Worker(Thread):
+        def join(self, timeout: Optional[float] = None) -> None:
+            nonlocal joined
+            super().join(timeout)
+            joined = True
+
+    def show(*arguments: Any) -> None:
+        rendered.append(joined)
+        render(*arguments)
+
+    monkeypatch.setattr(cli, 'BenchmarkRunner', lambda: runner)
+    monkeypatch.setattr(cli, 'Thread', Worker)
+    monkeypatch.setattr(cli, 'render', show)
+    previous = install(signal.SIGINT, signal.default_int_handler)
+    monkeypatch.setattr(signal, 'signal', replace)
+    try:
+        assert cli.main(['--warmup=0', '--duration=.02']) == 130
+        output, errors = capsys.readouterr()
+        assert fired
+        assert joined
+        assert rendered
+        assert all(rendered), 'intermediate output escaped before native cleanup'
+        assert not output
+        assert 'Full Pi equivalent :' in errors
+        assert runner._active is None
+        assert runner._native is None
+        assert runner._handle is None
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        install(signal.SIGINT, previous)
+    assert_runner_reusable(runner)

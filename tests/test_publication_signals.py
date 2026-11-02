@@ -462,7 +462,12 @@ finally:
     interpreters.destroy(interpreter)
     signal.signal(signal.SIGINT, previous)
 '''
-    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, check=False, timeout=30)
+    # Coverage's startup hook deadlocks CPython 3.10 subinterpreter teardown.
+    # This helper tests build tooling, outside the measured benchset package.
+    environment = os.environ.copy()
+    environment.pop('COVERAGE_PROCESS_START', None)
+    result = subprocess.run([sys.executable, '-c', code], env=environment,
+                            capture_output=True, text=True, check=False, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == 'equivalent\n'
 
