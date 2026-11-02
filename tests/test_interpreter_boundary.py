@@ -40,16 +40,16 @@ first, second = _native.Native(), _native.Native()
 assert first.lib.benchset_abi_version is not second.lib.benchset_abi_version
 ratios = tuple(benchset.BenchmarkResult(name, status='completed', pi_equivalent=ratio) for name, ratio in zip(benchset.BENCHMARKS, (1., 4.)))
 assert benchset.SuiteResult.from_results(ratios).aggregated_scores.pi_equivalent == 2.
-unknown = benchset.run('unknown', warmup_seconds=0, measurement_seconds=.005)
+unknown = benchset.run('unknown', warmup_seconds=0, measurement_seconds=.1)
 assert (unknown.status, unknown.reason) == ('failed', 'unknown benchmark: unknown')
-single = benchset.run('single_core', warmup_seconds=0, measurement_seconds=.005)
-assert single.success and single.pi_equivalent is not None
-suite = benchset.run_all(warmup_seconds=0, measurement_seconds=.005)
-assert [item.status for item in suite.results] == ['completed', 'completed']
+single = benchset.run('single_core', warmup_seconds=0, measurement_seconds=.1)
+assert single.success and single.pi_equivalent is not None, single
+suite = benchset.run_all(warmup_seconds=0, measurement_seconds=.1)
+assert [item.status for item in suite.results] == ['completed', 'completed'], suite
 assert suite.aggregated_scores.pi_equivalent is not None
 runner = benchset.BenchmarkRunner()
-assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.005, on_progress=lambda p: runner.cancel()).status == 'cancelled'
-assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.005).success
+assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.1, on_progress=lambda p: runner.cancel()).status == 'cancelled'
+assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.1).success
 for parent in (float, int):
     calls = []
     class Ratio(parent):
