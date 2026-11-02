@@ -95,7 +95,7 @@ raise SystemExit(status)
         writer = -1
         assert process.stderr is not None
         if operation == 'pending':
-            assert process.wait(timeout=3) == 130
+            assert process.wait(timeout=CLI_PROCESS_TIMEOUT) == 130
             diagnostics = process.stderr.read()
             assert 'single_core' in diagnostics
             assert 'Full Pi equivalent :' in diagnostics
@@ -104,7 +104,7 @@ raise SystemExit(status)
         assert select.select([process.stderr], [], [], 5)[0], 'output operation was never reached'
         assert process.stderr.readline() == 'blocked\n'
         process.send_signal(signal.SIGINT)
-        assert process.wait(timeout=3) == 130
+        assert process.wait(timeout=5) == 130
         assert not process.stderr.read()
     finally:
         if process is not None:

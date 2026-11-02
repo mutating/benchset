@@ -7,6 +7,7 @@ from typing import List, Optional
 import pytest
 
 from benchset import BenchmarkResult, BenchmarkRunner, Progress
+from tests.helpers import assert_runner_reusable
 
 
 @pytest.mark.parametrize('cancel_at', [1, 2])
@@ -26,11 +27,11 @@ def test_name_operator_cancellation_keeps_validation_before_runner_ownership(can
             return str.__eq__(self, other)
 
     name = Name('single_core')
-    result = runner.run(name, warmup_seconds=0, measurement_seconds=.01)
+    result = runner.run(name, warmup_seconds=0, measurement_seconds=.1)
     assert result.status == ('completed' if cancel_at == 1 else 'cancelled')
     assert result.benchmark is name
     assert name.comparisons == 2
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+    assert_runner_reusable(runner)
 
 
 def test_name_operator_can_complete_a_nested_run_before_outer_ownership() -> None:
@@ -44,14 +45,14 @@ def test_name_operator_can_complete_a_nested_run_before_outer_ownership() -> Non
 
         def __eq__(self, other: object) -> bool:
             if not nested:
-                nested.append(runner.run('multi_core', warmup_seconds=0, measurement_seconds=.01))
+                nested.append(runner.run('multi_core', warmup_seconds=0, measurement_seconds=.1))
             return str.__eq__(self, other)
 
-    result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
+    result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1)
     assert len(nested) == 1
     assert nested[0].success
     assert result.success
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize('outcome', ['valid', 'invalid', 'error'])
@@ -74,7 +75,7 @@ def test_name_operator_may_publish_another_owner_during_validation(outcome: str)
 
     def execute() -> None:
         try:
-            results.append(runner.run('multi_core', warmup_seconds=0, measurement_seconds=.01,
+            results.append(runner.run('multi_core', warmup_seconds=0, measurement_seconds=.1,
                                       on_progress=progress))
         finally:
             ready.set()
@@ -96,15 +97,15 @@ def test_name_operator_may_publish_another_owner_during_validation(outcome: str)
     try:
         if outcome == 'error':
             with pytest.raises(ValueError, match='name comparison failed') as caught:
-                runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
+                runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1)
             assert caught.value is error
             assert caught.value.__context__ is None
         else:
-            result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
+            result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1)
             expected = 'this runner is already running' if outcome == 'valid' else 'unknown benchmark: single_core'
             assert result.reason == expected
         assert not results
-        assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).reason == 'this runner is already running'
+        assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.1).reason == 'this runner is already running'
     finally:
         runner.cancel()
         release.set()
@@ -114,7 +115,7 @@ def test_name_operator_may_publish_another_owner_during_validation(outcome: str)
     assert not worker.is_alive()
     assert len(results) == 1
     assert results[0].status == 'cancelled'
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+    assert_runner_reusable(runner)
 
 
 def test_name_operator_can_finish_an_existing_owner_before_claim() -> None:
@@ -128,7 +129,7 @@ def test_name_operator_can_finish_an_existing_owner_before_claim() -> None:
         assert release.wait(5)
 
     worker = Thread(target=lambda: results.append(runner.run('multi_core', warmup_seconds=0,
-                                                             measurement_seconds=.01, on_progress=progress)))
+                                                             measurement_seconds=.1, on_progress=progress)))
 
     class Name(str):
         __slots__ = ('__dict__',)
@@ -146,7 +147,7 @@ def test_name_operator_can_finish_an_existing_owner_before_claim() -> None:
     worker.start()
     try:
         assert entered.wait(5)
-        result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
+        result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1)
         assert result.success
         assert len(results) == 1
         assert results[0].status == 'cancelled'
@@ -155,7 +156,7 @@ def test_name_operator_can_finish_an_existing_owner_before_claim() -> None:
         release.set()
         worker.join(5)
     assert not worker.is_alive()
-    assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+    assert_runner_reusable(runner)
 
 
 @pytest.mark.parametrize('policy', ['default', 'handled', 'custom', 'ignored'])
@@ -194,14 +195,14 @@ def test_name_validation_operator_observes_the_callers_sigint_policy(policy: str
     try:
         if policy == 'default':
             with pytest.raises(KeyboardInterrupt) as caught:
-                runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
+                runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1)
             assert len(raised) == 1
             assert caught.value is raised[0]
             assert caught.value.__context__ is None
             assert events == ['compare']
         else:
             try:
-                result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
+                result = runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1)
             except KeyboardInterrupt:
                 pytest.fail('the caller handled or ignored the validation signal')
             assert result.success
@@ -209,7 +210,7 @@ def test_name_validation_operator_observes_the_callers_sigint_policy(policy: str
             expected = ['compare', 'custom-handler', 'after-signal'] if policy == 'custom' else ['compare', 'after-signal']
             assert events == expected
         assert signal.getsignal(signal.SIGINT) is handler
-        assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+        assert_runner_reusable(runner)
     finally:
         signal.signal(signal.SIGINT, previous)
 
@@ -237,18 +238,18 @@ def test_nested_run_from_name_validation_keeps_default_sigint_cancellation(signa
         def __eq__(self, other: object) -> bool:
             if not events:
                 events.append('nested')
-                runner.run('multi_core', warmup_seconds=0, measurement_seconds=.01, on_progress=progress)
+                runner.run('multi_core', warmup_seconds=0, measurement_seconds=.1, on_progress=progress)
                 events.append('after-nested')
             return str.__eq__(self, other)
 
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         with pytest.raises(KeyboardInterrupt):
-            runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01, on_progress=outer_progress)
+            runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1, on_progress=outer_progress)
         expected = ['nested', 'nested-progress'] if signal_at == 'nested' else ['nested', 'after-nested', 'outer-progress']
         assert events == expected
         assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
-        assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+        assert_runner_reusable(runner)
     finally:
         signal.signal(signal.SIGINT, previous)
 
@@ -293,7 +294,7 @@ def test_repeated_name_operator_sigint_preserves_default_exception_chain(second_
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         with pytest.raises(KeyboardInterrupt) as caught:
-            runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.01)
+            runner.run(Name('single_core'), warmup_seconds=0, measurement_seconds=.1)
         assert len(raised) == 2
         assert caught.value is raised[1]
         assert raised[0].__context__ is None
@@ -301,6 +302,6 @@ def test_repeated_name_operator_sigint_preserves_default_exception_chain(second_
         assert caught.value.__cause__ is None
         assert events == ['operator-finally' if second_signal == 'finally' else 'after-first-signal']
         assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
-        assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+        assert_runner_reusable(runner)
     finally:
         signal.signal(signal.SIGINT, previous)
