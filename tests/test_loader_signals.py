@@ -449,19 +449,27 @@ def test_real_sigint_does_not_leak_an_os_loader_reference(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_reentrant_loading_releases_the_surplus_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('platform', ['darwin', 'linux', 'win32'])
+def test_reentrant_loading_releases_the_surplus_reference(
+    monkeypatch: pytest.MonkeyPatch, platform: str,
+) -> None:
     """A loader audit hook may reenter loading; only the shared cache owner may survive.
 
     Both misses open the same image. A subsequent SIGINT must not strand the
     outer, uncached OS reference, and the nested owner must not be closed.
+    Use the absolute path supplied by Native on every platform: Windows
+    normalizes relative names before entering the opener's audit hook.
     """
     cached: Any = getattr(_native, '_open_library', _native._load_library)
     cached.cache_clear()
     opened: List[int] = []
     closed: List[int] = []
     nested: List[object] = []
+    requested = str(Path('reentrant-probe').resolve())
+    monkeypatch.setattr(_native, 'sys', SimpleNamespace(platform=platform))
 
     def open_image(path: str, _mode: int) -> int:
+        assert path == requested
         handle = 701 + len(opened)
         opened.append(handle)
         if len(opened) == 1:
@@ -479,10 +487,10 @@ def test_reentrant_loading_releases_the_surplus_reference(monkeypatch: pytest.Mo
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         with pytest.raises(KeyboardInterrupt):
-            _native._load_library('reentrant-probe')
+            _native._load_library(requested)
         assert opened == [701, 702]
         assert closed == [701], 'only the redundant outer reference should be released'
-        assert _native._load_library('reentrant-probe') is nested[0]
+        assert _native._load_library(requested) is nested[0]
         assert cast(Any, nested[0])._handle == 702
     finally:
         signal.signal(signal.SIGINT, previous)
