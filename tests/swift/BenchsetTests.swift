@@ -6,6 +6,7 @@ import Testing
 
 private final class NativeStub {
     let pointer = OpaquePointer(bitPattern: 0x1234)!
+    let suitePointer = OpaquePointer(bitPattern: 0x5678)!
     var abi: UInt32 = BENCHSET_ABI_VERSION
     var abiChecks = 0
     var allocationFails = false
@@ -15,6 +16,10 @@ private final class NativeStub {
     var creates = 0
     var frees = 0
     var cancels = 0
+    var suiteCreates = 0
+    var suiteFrees = 0
+    var suiteCancels = 0
+    var betweenBenchmarks: (() -> Void)?
     var configs: [BenchsetConfig] = []
     var value = BenchsetResult()
     var piEquivalent = 0.12345678901234567
@@ -57,7 +62,7 @@ private final class NativeStub {
         reasonPointer = string.map { strdup($0)! }
     }
     var api: NativeAPI {
-        NativeAPI(
+        let single = NativeAPI(
             abiVersion: { self.abiChecks += 1; return self.abi },
             create: { self.creates += 1; return self.allocationFails ? nil : self.pointer },
             defaultConfig: { out in
@@ -84,7 +89,8 @@ private final class NativeStub {
                 return self.value.status
             },
             cancel: { handle in #expect(handle == self.pointer); self.cancels += 1 },
-            result: { _, out, size in
+            result: { handle, out, size in
+                #expect(handle == self.pointer)
                 self.resultSizes.append(size)
                 #expect(size == UInt32(MemoryLayout<BenchsetResultV2>.size))
                 self.value.sample_count = UInt64(self.samples.count)
@@ -92,16 +98,61 @@ private final class NativeStub {
                                               has_pi_equivalent: self.hasPiEquivalent)
                 return self.resultAvailable ? 1 : 0
             },
-            sample: { _, index, out in
+            sample: { handle, index, out in
+                #expect(handle == self.pointer)
                 if self.missingSample == index { return 0 }
                 out.pointee = self.samples[Int(index)]
                 return 1
             },
-            reason: { _ in self.reasonPointer.map { UnsafePointer($0) } },
+            reason: { handle in
+                #expect(handle == self.pointer)
+                return self.reasonPointer.map { UnsafePointer($0) }
+            },
             version: { UnsafePointer(self.versionPointer) },
             free: { handle in #expect(handle == self.pointer); self.frees += 1 }
         )
+        var native = single
+        native.suite = SuiteAPI(
+            create: { self.suiteCreates += 1; return self.allocationFails ? nil : self.suitePointer },
+            run: { handle, config, callback, resultCallback, user in
+                #expect(handle == self.suitePointer)
+                for id in [BENCHSET_SINGLE_CORE, BENCHSET_MULTI_CORE] {
+                    var current = config.pointee
+                    current.benchmark = id
+                    let context = StubSuiteCallbackContext(benchmark: id, callback: callback, user: user)
+                    _ = withExtendedLifetime(context) {
+                        single.run(self.pointer, &current, forwardStubSuiteProgress,
+                                   Unmanaged.passUnretained(context).toOpaque())
+                    }
+                    let stop = resultCallback(id, self.pointer, user)
+                    if self.value.status != BENCHSET_COMPLETED || stop != 0 { break }
+                    if id == BENCHSET_SINGLE_CORE { self.betweenBenchmarks?() }
+                }
+                return self.value.status
+            },
+            cancel: { handle in #expect(handle == self.suitePointer); self.suiteCancels += 1 },
+            free: { handle in #expect(handle == self.suitePointer); self.suiteFrees += 1 }
+        )
+        return native
     }
+}
+
+private final class StubSuiteCallbackContext {
+    let benchmark: UInt32
+    let callback: NativeSuiteCallback
+    let user: UnsafeMutableRawPointer
+    init(benchmark: UInt32, callback: @escaping NativeSuiteCallback, user: UnsafeMutableRawPointer) {
+        self.benchmark = benchmark
+        self.callback = callback
+        self.user = user
+    }
+}
+
+private func forwardStubSuiteProgress(_ pointer: UnsafePointer<BenchsetProgress>?, _ user: UnsafeMutableRawPointer?) {
+    guard let value = pointer?.pointee, let user = user else { return }
+    let context = Unmanaged<StubSuiteCallbackContext>.fromOpaque(user).takeUnretainedValue()
+    var progress = BenchsetSuiteProgress(benchmark: context.benchmark, progress: value)
+    withUnsafePointer(to: &progress) { context.callback($0, context.user) }
 }
 
 private final class LockedBox<T> {
@@ -131,8 +182,193 @@ func expectRunnerReusable(_ runner: BenchmarkRunner, warmupSeconds: Double = 10)
 @Suite(.serialized)
 struct BenchsetTests {
 
-    /// Keep the suite reservation across native-handle teardown and replacement.
-    /// A contender queued during free must never run between the owner's two
+    /// Checks the defaults loader's ABI before a layout-sensitive getter call,
+    /// discards getter failure, and preserves full-precision values on retry.
+    /// Public default arguments must never consume an unchecked C structure.
+    @Test func defaultLoaderChecksABIAndGetterBeforePublishingValues() throws {
+        let stub = NativeStub()
+        var native = stub.api
+        var calls = 0
+        let warmup = 1.2345678901234567
+        let measurement = 9.876543210987654
+        var available: Int32 = 1
+        native.defaultConfig = { out in
+            calls += 1
+            out.pointee.warmup_seconds = warmup
+            out.pointee.measurement_seconds = measurement
+            return available
+        }
+        for abi: UInt32 in [0, 2, UInt32.max] {
+            stub.abi = abi
+            let defaults = loadDefaults(using: native)
+            #expect(defaults.warmup_seconds == 0 && defaults.measurement_seconds == 0)
+            #expect(calls == 0)
+        }
+        stub.abi = BENCHSET_ABI_VERSION
+        available = 0
+        let unavailable = loadDefaults(using: native)
+        #expect(unavailable.warmup_seconds == 0 && unavailable.measurement_seconds == 0)
+        #expect(calls == 1)
+        available = 1
+        let defaults = loadDefaults(using: native)
+        #expect(defaults.warmup_seconds.bitPattern == warmup.bitPattern)
+        #expect(defaults.measurement_seconds.bitPattern == measurement.bitPattern)
+        #expect(calls == 2)
+    }
+
+    /// Derives omitted windows from the linked Rust defaults while preserving
+    /// explicit signed zero. Changing Rust's defaults must update both Swift
+    /// entry points without introducing a hardcoded fallback or zero sentinel.
+    @Test func defaultsFollowNativeConfigAndPreserveExplicitSignedZero() throws {
+        var expected = BenchsetConfig()
+        #expect(benchset_default_config(&expected) == 1)
+        #expect(defaultWarmupSeconds.bitPattern == expected.warmup_seconds.bitPattern)
+        #expect(defaultMeasurementSeconds.bitPattern == expected.measurement_seconds.bitPattern)
+        let stub = NativeStub()
+        let runner = BenchmarkRunner(native: stub.api)
+        for suite in [false, true] {
+            stub.configs.removeAll()
+            if suite { _ = try runner.runAll() }
+            else { _ = try runner.run(.singleCore) }
+            #expect(stub.configs.count == (suite ? 2 : 1))
+            #expect(stub.configs.allSatisfy {
+                $0.warmup_seconds.bitPattern == expected.warmup_seconds.bitPattern
+                    && $0.measurement_seconds.bitPattern == expected.measurement_seconds.bitPattern
+            })
+            stub.configs.removeAll()
+            if suite { _ = try runner.runAll(warmupSeconds: -0.0, measurementSeconds: -0.0) }
+            else { _ = try runner.run(.singleCore, warmupSeconds: -0.0, measurementSeconds: -0.0) }
+            #expect(stub.configs.count == (suite ? 2 : 1))
+            #expect(stub.configs.allSatisfy {
+                $0.warmup_seconds.bitPattern == (-0.0 as Double).bitPattern
+                    && $0.measurement_seconds.bitPattern == (-0.0 as Double).bitPattern
+            })
+        }
+    }
+
+    /// Copies every individual snapshot before native storage is reused or freed.
+    /// Distinct reasons, samples and optional ratios catch retaining a borrowed
+    /// child handle or decoding all results from the final child's buffers.
+    @Test func suiteSnapshotsOwnEachNativePayload() throws {
+        let stub = NativeStub()
+        stub.action = { stub, _, _ in
+            let ordinal = stub.configs.count
+            stub.setReason("result \(ordinal)")
+            stub.value.iterations = UInt64(ordinal * 8)
+            stub.piEquivalent = ordinal == 1 ? 0.5 : 2
+            stub.samples = [BenchsetSample(elapsed_seconds: Double(ordinal), duration_seconds: 0.5,
+                                          iterations: UInt64(ordinal * 8), iterations_per_second: Double(ordinal * 16))]
+        }
+        let suite = try BenchmarkRunner(native: stub.api).runAll()
+        stub.setReason(nil)
+        stub.samples.removeAll()
+        stub.piEquivalent = 99
+        #expect(suite.results.map { $0.reason } == ["result 1", "result 2"])
+        #expect(suite.results.map { $0.iterations } == [8, 16])
+        #expect(suite.results.map { $0.piEquivalent } == [0.5, 2])
+        #expect(suite.results.map { $0.samples.count } == [1, 1])
+        #expect(suite.results.map { $0.samples[0].elapsedSeconds } == [1, 2])
+        #expect(suite.results.map { $0.samples[0].iterations } == [8, 16])
+        #expect(suite.aggregatedScores.piEquivalent == 1)
+    }
+
+    /// Releases suite progress captures, runner and native owner on every exit.
+    /// Getter failures must unwind only after native code returns, free the
+    /// suite exactly once, and release the context and native function table.
+    @Test func suiteCallbackCapturesReleaseOnAllExits() throws {
+        final class Probe { var calls = 0 }
+        for stage in ["abi", "allocation", "config", "result", "sample", "completed"] {
+            weak var observedStub: NativeStub?
+            weak var observed: Probe?
+            weak var observedRunner: BenchmarkRunner?
+            func exercise() throws {
+                let stub = NativeStub()
+                observedStub = stub
+                stub.abi = stage == "abi" ? 0 : BENCHSET_ABI_VERSION
+                stub.allocationFails = stage == "allocation"
+                stub.configAvailable = stage != "config"
+                stub.resultAvailable = stage != "result"
+                stub.missingSample = stage == "sample" ? 0 : nil
+                func makeCallback() -> (Benchmark, Benchset.Progress) -> Void {
+                    let probe = Probe()
+                    observed = probe
+                    return { _, _ in probe.calls += 1 }
+                }
+                let runner = BenchmarkRunner(native: stub.api)
+                observedRunner = runner
+                if stage == "completed" {
+                    #expect(try runner.runAll(onProgress: makeCallback()).results.count == 2)
+                } else {
+                    let error: BenchsetError = stage == "allocation" ? .allocationFailed : .resultUnavailable
+                    #expect(throws: error) { try runner.runAll(onProgress: makeCallback()) }
+                }
+                #expect(observed == nil)
+                #expect(stub.suiteFrees == (stage == "abi" || stage == "allocation" ? 0 : 1))
+            }
+            try exercise()
+            #expect(observedRunner == nil)
+            #expect(observedStub == nil)
+        }
+    }
+
+    /// Accepts absent progress pointers/context and contains malformed result
+    /// identifiers or missing child handles inside C callbacks. Swift errors
+    /// must surface only after native code returns, with the suite freed once.
+    @Test func suiteCallbackBoundaryRejectsMalformedResultsWithoutUnwinding() throws {
+        let stub = NativeStub()
+        var native = stub.api
+        let run = native.suite.run
+        native.suite.run = { handle, config, progress, result, user in
+            progress(nil, user)
+            progress(nil, nil)
+            var value = BenchsetSuiteProgress()
+            withUnsafePointer(to: &value) { progress($0, nil) }
+            #expect(result(BENCHSET_SINGLE_CORE, stub.pointer, nil) == 1)
+            return run(handle, config, progress, result, user)
+        }
+        #expect(try BenchmarkRunner(native: native).runAll().results.count == 2)
+        #expect(stub.suiteFrees == 1)
+        for malformed in ["progress-id", "result-id", "handle"] {
+            native.suite.run = { _, _, progress, result, user in
+                if malformed == "progress-id" {
+                    var value = BenchsetSuiteProgress(benchmark: UInt32.max, progress: BenchsetProgress())
+                    withUnsafePointer(to: &value) { progress($0, user) }
+                }
+                #expect(result(malformed == "result-id" ? UInt32.max : BENCHSET_SINGLE_CORE,
+                               malformed == "handle" ? nil : stub.pointer, user) == 1)
+                return BENCHSET_COMPLETED
+            }
+            let freed = stub.suiteFrees
+            #expect(throws: BenchsetError.resultUnavailable) { try BenchmarkRunner(native: native).runAll() }
+            #expect(stub.suiteFrees == freed + 1)
+        }
+    }
+
+    /// Dispatches cancellation and cleanup to the active handle's native API.
+    /// Distinct single/suite addresses prevent a wrong getter or cancellation
+    /// function from appearing correct merely because opaque handles coincide.
+    @Test func cancellationUsesTheActiveNativeHandleKind() throws {
+        let stub = NativeStub()
+        let runner = BenchmarkRunner(native: stub.api)
+        runner.cancel()
+        var cancelled = false
+        #expect(try runner.runAll { _, _ in
+            if !cancelled { cancelled = true; runner.cancel() }
+        }.results.count == 2)
+        runner.cancel()
+        #expect(stub.suiteCancels == 1 && stub.cancels == 0)
+        #expect(stub.suiteCreates == 1 && stub.suiteFrees == 1)
+        cancelled = false
+        #expect(try runner.run(.singleCore) { _ in
+            if !cancelled { cancelled = true; runner.cancel() }
+        }.success)
+        runner.cancel()
+        #expect(stub.suiteCancels == 1 && stub.cancels == 1)
+        #expect(stub.creates == 1 && stub.frees == 1)
+    }
+
+    /// Keep the suite reservation across native benchmark boundaries.
+    /// A contender queued between results must never run between the owner's two
     /// benchmarks; both another suite and a standalone run obey that reservation.
     /// Repeat queued contenders to exercise scheduler handoffs without requiring
     /// either thread to acquire the lock first in any particular iteration.
@@ -146,22 +382,17 @@ struct BenchsetTests {
                 let secondStarted = LockedBox(false)
                 let intruded = LockedBox(false)
                 let owner = Thread.current
-                var native = stub.api
-                let free = native.free
-                native.free = { handle in
-                    free(handle)
-                    if stub.frees == 1 {
-                        freeing.signal()
-                        #expect(attempting.wait(timeout: .now() + 5) == .success)
-                        usleep(1000)
-                    }
+                stub.betweenBenchmarks = {
+                    freeing.signal()
+                    #expect(attempting.wait(timeout: .now() + 5) == .success)
+                    usleep(1000)
                 }
                 stub.action = { stub, _, _ in
                     if Thread.current === owner {
                         if stub.configs.last?.benchmark == Benchmark.multiCore.rawValue { secondStarted.value = true }
                     } else if !secondStarted.value { intruded.value = true }
                 }
-                let runner = BenchmarkRunner(native: native)
+                let runner = BenchmarkRunner(native: stub.api)
                 DispatchQueue.global().async {
                     defer { finished.signal() }
                     guard freeing.wait(timeout: .now() + 5) == .success else { return }
@@ -226,7 +457,7 @@ struct BenchsetTests {
         #expect(cancelDone.wait(timeout: .now() + 5) == .success)
         #expect(outcomes.value.filter { $0 == "owner" }.count == 1)
         #expect(outcomes.value.filter { $0 == "busy" }.count == 7)
-        #expect(stub.creates == 2 && stub.frees == 2)
+        #expect(stub.suiteCreates == 1 && stub.suiteFrees == 1)
     }
 
     /// Keeps progress on the caller thread, full sample payloads and one result per benchmark.
@@ -278,7 +509,7 @@ struct BenchsetTests {
         #expect(stub.configs.allSatisfy { $0.warmup_seconds == 0.25 && $0.measurement_seconds == 0.75 })
         #expect(benchmarks == Array(repeating: .singleCore, count: stub.phases.count)
             + Array(repeating: .multiCore, count: stub.phases.count))
-        #expect(stub.creates == 2 && stub.frees == 2)
+        #expect(stub.suiteCreates == 1 && stub.suiteFrees == 1)
         #expect(result.results.allSatisfy { $0.unstable })
         #expect(SuiteResult(results: []).aggregatedScores.piEquivalent == nil)
         #expect(SuiteResult(results: [result.results[0]]).aggregatedScores.piEquivalent == nil)
@@ -302,7 +533,7 @@ struct BenchsetTests {
                 #expect(result.results.count == stop)
                 #expect(result.results.last?.status == status)
                 #expect(result.aggregatedScores.piEquivalent == nil)
-                #expect(stub.frees == stop)
+                #expect(stub.suiteFrees == 1)
             }
         }
         let stub = NativeStub()
@@ -410,12 +641,12 @@ struct BenchsetTests {
         stub.action = { stub, _, _ in
             if stub.configs.count == failingRun { stub.resultAvailable = false }
         }
-        let freesBefore = stub.frees
+        let freesBefore = stub.suiteFrees
         var published: SuiteResult?
         #expect(throws: BenchsetError.resultUnavailable) { published = try runner.runAll() }
         #expect(published == nil)
         #expect(stub.configs.count == failingRun)
-        #expect(stub.frees == freesBefore + 2)
+        #expect(stub.suiteFrees == freesBefore + 1)
         runner.cancel()
         #expect(stub.cancels == 0)
         stub.resultAvailable = true

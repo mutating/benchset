@@ -8,7 +8,7 @@ import pytest
 
 from benchset import BenchmarkResult, BenchmarkRunner, api, cli, run, run_all
 from benchset._native import Native
-from tests.helpers import assert_result_references
+from tests.helpers import assert_result_references, mock_suite
 
 
 def test_missing_library_is_a_failed_result(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,12 +96,28 @@ class Terminal(io.StringIO):
         return True
 
 
-def test_terminal_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    terminal = Terminal()
+def _assert_completed_or_no_work(code: int, output: str, errors: str) -> None:
+    """Permit the documented short-window outcome while rejecting every other failure."""
+    if code == 0:
+        assert 'completed' in output
+        assert not errors
+    else:
+        assert code == 1
+        assert 'failed' in errors
+        reasons = [line.split(':', 1)[1].strip() for line in errors.splitlines() if line.startswith('Reason ')]
+        assert reasons == ['measurement window was too short to complete any work']
+
+
+@pytest.mark.parametrize('duration', ['0.02', '0.000000001'])
+def test_terminal_progress(monkeypatch: pytest.MonkeyPatch, duration: str) -> None:
+    """Terminal measurement frames reach 100% even when no work fits in the window."""
+    terminal, errors = Terminal(), io.StringIO()
     monkeypatch.setenv('COLUMNS', '80')
     monkeypatch.setattr(cli.sys, 'stdout', terminal)
-    assert cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '0.02']) == 0
-    assert 'measurement' in terminal.getvalue()
+    monkeypatch.setattr(cli.sys, 'stderr', errors)
+    code = cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', duration])
+    _assert_completed_or_no_work(code, terminal.getvalue(), errors.getvalue())
+    assert '\rsingle_core: measurement ' in terminal.getvalue()
     assert '100.0%' in terminal.getvalue()
 
 
@@ -109,6 +125,7 @@ def test_background_failure_reaches_stderr(monkeypatch: pytest.MonkeyPatch, caps
     def broken(*_arguments: object, **_keywords: object) -> BenchmarkResult:
         raise RuntimeError('background failure')
     monkeypatch.setattr(BenchmarkRunner, 'run', broken)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench', 'single_core', '--warmup', '0', '--duration', '0.02']) == 1
     captured = capsys.readouterr()
     assert not captured.out
@@ -168,7 +185,8 @@ def test_cli_interrupt_at_worker_boundaries(
     monkeypatch.setattr(cli, 'BenchmarkRunner', lambda: runner)
     try:
         try:
-            status = cli.main(['--warmup', '0', '--duration', '0.05'])
+            selection = ['--bench', 'single_core'] if 'join' in boundary else []
+            status = cli.main([*selection, '--warmup', '0', '--duration', '0.05'])
         except KeyboardInterrupt:
             pytest.fail('SIGINT escaped the CLI during ' + boundary)
         assert status == 130
@@ -179,7 +197,7 @@ def test_cli_interrupt_at_worker_boundaries(
                 Thread.join(worker, 5)
     assert workers
     assert all(not worker.is_alive() for worker in workers)
-    assert len(workers) == 1  # An interrupted suite must not start multi_core.
+    assert len(workers) == 1  # Each command owns one worker, including native suites.
     assert signal.getsignal(signal.SIGINT) is original_handler
     captured = capsys.readouterr()
     assert not captured.out
@@ -199,15 +217,35 @@ def test_cli_restores_signal_handler_after_start_failure(monkeypatch: pytest.Mon
     assert signal.getsignal(signal.SIGINT) is original_handler
 
 
-def test_cli_can_run_outside_main_thread(capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize('selection', ['single_core', 'all'])
+@pytest.mark.parametrize('duration', ['0.02', '0.000000001'])
+def test_cli_can_run_outside_main_thread(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], selection: str, duration: str,
+) -> None:
+    """Single and streaming suites never attempt signal installation off the main thread.
+
+    Observe handler changes directly, independent of benchmark scheduling. The
+    nanosecond control exercises legitimate no-work output and code 1; no other
+    failure may be accepted. The signal spy records without changing process
+    state so a broken cleanup loop cannot hang while retrying a forbidden call.
+    """
     results: List[int] = []
+    signal_calls: List[int] = []
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def record_signal(signum: int, _handler: object) -> object:
+        signal_calls.append(signum)
+        return original_handler
+
+    monkeypatch.setattr(signal, 'signal', record_signal)
     worker = Thread(target=lambda: results.append(cli.main([
-        '--bench', 'single_core', '--warmup', '0', '--duration', '0.02',
+        '--bench', selection, '--warmup', '0', '--duration', duration,
     ])))
     worker.start()
     worker.join(5)
     assert not worker.is_alive()
-    assert results == [0]
+    assert len(results) == 1
     captured = capsys.readouterr()
-    assert 'completed' in captured.out
-    assert not captured.err
+    _assert_completed_or_no_work(results[0], captured.out, captured.err)
+    assert not signal_calls
+    assert signal.getsignal(signal.SIGINT) is original_handler

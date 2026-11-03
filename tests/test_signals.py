@@ -4,7 +4,7 @@ import os
 import signal
 import subprocess
 import sys
-from typing import Iterator
+from typing import Callable, Iterator
 
 import pytest
 
@@ -88,8 +88,9 @@ else:
 
 @pytest.mark.usefixtures('default_sigint')
 @pytest.mark.parametrize('stage', ['loading', 'allocation', 'execute', 'free_before', 'free_after'])
-def test_sigint_defers_through_handle_lifetime_and_restores_runner(
-    monkeypatch: pytest.MonkeyPatch, stage: str,
+@pytest.mark.parametrize('suite', [False, True])
+def test_sigint_defers_through_handle_lifetime_and_restores_runner(  # noqa: PLR0915 — Keep all lifetime fault injections in one matrix.
+    monkeypatch: pytest.MonkeyPatch, stage: str, suite: bool,
 ) -> None:
     """Deliver SIGINT to native cancellation while deferring the exception until cleanup.
 
@@ -100,26 +101,29 @@ def test_sigint_defers_through_handle_lifetime_and_restores_runner(
     backend = ManagedNative()
     original_create, original_free = backend.create, backend.free
     armed = True
+    cancel_attempts = []
 
     def interrupt() -> None:
         if armed:
             signal.raise_signal(signal.SIGINT)
             signal.raise_signal(signal.SIGINT)
 
-    def create() -> int:
-        handle = original_create()
+    def create(suite: bool = False) -> int:
+        handle = original_create(suite)
         if stage == 'allocation':
             interrupt()
         return handle
 
-    def free(handle: int) -> None:
+    def free(handle: int, suite: bool = False) -> None:
         if stage == 'free_before':
             interrupt()
-        original_free(handle)
+        original_free(handle, suite)
         if stage == 'free_after':
             interrupt()
 
-    def cancel(handle: int) -> None:
+    def cancel(handle: int, suite: bool = False) -> None:
+        cancel_attempts.append(suite)
+        assert suite == backend.suites[-1]
         assert 'free' not in backend.calls, 'a signal must never cancel a freed handle'
         assert not stage.startswith('free'), 'cancellation must be disabled before freeing starts'
         assert handle == 123
@@ -139,14 +143,18 @@ def test_sigint_defers_through_handle_lifetime_and_restores_runner(
     monkeypatch.setattr(backend, 'cancel', cancel)
     monkeypatch.setattr(api, 'Native', factory)
     runner = BenchmarkRunner()
+    execute: Callable[[], object] = lambda: (runner._run_all(0, .01, progress) if suite else
+        runner.run('single_core', warmup_seconds=0, measurement_seconds=.01, on_progress=progress))
     try:
         with pytest.raises(KeyboardInterrupt):
-            runner.run('single_core', warmup_seconds=0, measurement_seconds=.01, on_progress=progress)
+            execute()
         assert backend.calls.count('free') == backend.calls.count('create')
         assert runner._handle is None
         assert runner._native is None
         assert not runner._active
         assert ('cancel' in backend.calls) == (stage in ('loading', 'allocation', 'execute'))
+        assert bool(cancel_attempts) == (stage in ('loading', 'allocation', 'execute'))
+        assert all(mode == suite for mode in cancel_attempts)
         assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     finally:
         armed = False
@@ -266,13 +274,14 @@ def handler(*_):
 
 def entry_line(method):
     source, start = inspect.getsourcelines(method)
-    return next(start + i for i, line in enumerate(source) if line.strip() == 'if self._active:')
+    marker = 'busy = self._active is not None' if method.__name__ == '_run' else 'if self._active:'
+    return next(start + i for i, line in enumerate(source) if line.strip() == marker)
 
-run_entry, cancel_entry = entry_line(BenchmarkRunner.run), entry_line(BenchmarkRunner.cancel)
+run_entry, cancel_entry = entry_line(BenchmarkRunner._run), entry_line(BenchmarkRunner.cancel)
 
 def trace(frame, event, _arg):
     if armed and event == 'line':
-        if frame.f_code is BenchmarkRunner.run.__code__:
+        if frame.f_code is BenchmarkRunner._run.__code__:
             if stage == 'entry' and frame.f_lineno == run_entry:
                 deliver()
             elif stage == 'claimed' and runner._active and runner._native is None:
@@ -314,4 +323,55 @@ faulthandler.cancel_dump_traceback_later()
 '''
     result = subprocess.run([sys.executable, '-c', code, stage], capture_output=True,
                             text=True, check=False, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_reentrant_signal_before_suite_claim_preserves_native_handle_kind() -> None:
+    """A nested single run cannot leave the outer suite using single-handle cancel/free.
+
+    A real signal at the ownership-publication line makes reentry deterministic.
+    The managed backend rejects incorrect handle kinds without invoking an
+    incompatible native destructor; the child isolates tracing and signal state.
+    """
+    program = r'''
+import inspect
+import signal
+import sys
+from benchset import BenchmarkRunner, api
+from tests.test_semantics import ManagedNative
+
+backend = ManagedNative()
+api.Native = lambda: backend
+runner = BenchmarkRunner()
+nested = []
+armed = True
+source, start = inspect.getsourcelines(BenchmarkRunner._run)
+claim = next(start + index for index, line in enumerate(source) if line.strip() == 'self._active = owner')
+
+def handler(*_):
+    nested.append(runner.run('single_core', warmup_seconds=0, measurement_seconds=.01))
+
+def trace(frame, event, _arg):
+    global armed
+    if armed and event == 'line' and frame.f_code is BenchmarkRunner._run.__code__ and frame.f_lineno == claim:
+        armed = False
+        signal.raise_signal(signal.SIGINT)
+    return trace
+
+previous = signal.signal(signal.SIGINT, handler)
+sys.settrace(trace)
+try:
+    suite = runner._run_all(0, .01, lambda _progress: runner.cancel())
+finally:
+    sys.settrace(None)
+    signal.signal(signal.SIGINT, previous)
+assert not armed and len(nested) == 1 and nested[0].success
+assert backend.suites == [False, True]
+assert backend.calls.count('cancel') == 2
+assert backend.calls.count('free') == backend.calls.count('create') == 2
+assert len(suite.results) == 2
+assert runner._active is None and runner._handle is None and runner._native is None
+assert runner.run('single_core', warmup_seconds=0, measurement_seconds=.01).success
+'''
+    result = subprocess.run([sys.executable, '-c', program], capture_output=True, text=True, check=False, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr

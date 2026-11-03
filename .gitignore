@@ -21,6 +21,7 @@ coverage.xml
 target/
 .venv/
 benchset/_native/
+benchset/.benchset.publish.lock
 Artifacts/
 .build/
 release-artifacts/

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{run_suite, SuiteResult};
+use crate::{run_suite_with, SuiteResult};
 
 #[repr(C)]
 pub struct CAggregatedScores {
@@ -21,6 +21,8 @@ pub struct CSuiteProgress {
 }
 
 pub type SuiteCallback = Option<unsafe extern "C" fn(*const CSuiteProgress, *mut c_void)>;
+pub type ResultCallback = Option<unsafe extern "C" fn(u32, *const Handle, *mut c_void) -> u32>;
+pub type ConfigCallback = Option<unsafe extern "C" fn(u32, *mut Config, *mut c_void) -> u32>;
 
 struct StoredSuite {
     result: SuiteResult,
@@ -85,6 +87,51 @@ pub unsafe extern "C" fn benchset_run_all(
     callback: SuiteCallback,
     user: *mut c_void,
 ) -> u32 {
+    benchset_run_all_observed(handle, config, callback, None, user)
+}
+
+/// Publish borrowed child snapshots before the next benchmark starts.
+#[no_mangle]
+pub unsafe extern "C" fn benchset_run_all_observed(
+    handle: *mut SuiteHandle,
+    config: *const Config,
+    callback: SuiteCallback,
+    on_result: ResultCallback,
+    user: *mut c_void,
+) -> u32 {
+    benchset_run_all_configured(handle, config, callback, on_result, None, user)
+}
+
+/// Configure each borrowed child copy before validation, or abort without a child result.
+#[no_mangle]
+pub unsafe extern "C" fn benchset_run_all_configured(
+    handle: *mut SuiteHandle,
+    config: *const Config,
+    callback: SuiteCallback,
+    on_result: ResultCallback,
+    on_config: ConfigCallback,
+    user: *mut c_void,
+) -> u32 {
+    execute_suite(
+        handle,
+        config,
+        callback,
+        on_result,
+        on_config,
+        user,
+        &mut |b, o, c, p| run(b, o, c, p),
+    )
+}
+
+unsafe fn execute_suite(
+    handle: *mut SuiteHandle,
+    config: *const Config,
+    callback: SuiteCallback,
+    on_result: ResultCallback,
+    on_config: ConfigCallback,
+    user: *mut c_void,
+    runner: &mut RustRunner<'_>,
+) -> u32 {
     let Some(handle) = handle.as_ref() else {
         return Status::Failed as u32;
     };
@@ -92,12 +139,8 @@ pub unsafe extern "C" fn benchset_run_all(
         return Status::Failed as u32;
     }
     let mut reasons = Vec::new();
-    let result = run_suite(|benchmark| {
-        let mut current = Handle {
-            cancellation: handle.cancellation.clone(),
-            used: AtomicBool::new(false),
-            result: Mutex::new(None),
-        };
+    let mut configuration_aborted = false;
+    let result = run_suite_with(|benchmark| {
         // Inspect the fixed prefix before copying the whole config, just as run does.
         let mut copied;
         let config = if !config.is_null()
@@ -105,10 +148,20 @@ pub unsafe extern "C" fn benchset_run_all(
             && ptr::addr_of!((*config).struct_size).read() == std::mem::size_of::<Config>() as u32
         {
             copied = config.read();
+            if on_config.is_some_and(|callback| callback(benchmark as u32, &mut copied, user) == 0)
+            {
+                configuration_aborted = true;
+                return None;
+            }
             copied.benchmark = benchmark as u32;
             &copied
         } else {
             config
+        };
+        let mut current = Handle {
+            cancellation: handle.cancellation.clone(),
+            used: AtomicBool::new(false),
+            result: Mutex::new(None),
         };
         let mut context = CallbackContext {
             benchmark,
@@ -120,13 +173,23 @@ pub unsafe extern "C" fn benchset_run_all(
             config,
             Some(progress_callback),
             (&mut context as *mut CallbackContext).cast(),
-            &mut |b, o, c, p| run(b, o, c, p),
+            runner,
         );
+        let proceed = on_result.map_or(true, |callback| {
+            callback(benchmark as u32, &current, user) == 0
+        });
         let stored = current.result.into_inner().unwrap().unwrap();
         reasons.push(stored.reason);
-        stored.result
+        Some((stored.result, proceed))
     });
-    let status = result.results.last().unwrap().status as u32;
+    let status = if configuration_aborted {
+        Status::Failed as u32
+    } else {
+        result
+            .results
+            .last()
+            .map_or(Status::Failed, |result| result.status) as u32
+    };
     let views = result.results.iter().map(linked_result).collect();
     *handle.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(StoredSuite {
         result,
@@ -241,3 +304,11 @@ pub unsafe extern "C" fn benchset_suite_free(handle: *mut SuiteHandle) {
 #[cfg(test)]
 #[path = "suite_ffi_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "observed_suite_tests.rs"]
+mod observed_tests;
+
+#[cfg(test)]
+#[path = "configured_suite_tests.rs"]
+mod configured_tests;

@@ -1,19 +1,20 @@
 """Build an interpreter-independent platform wheel containing the Rust CDylib."""
+import os
 import platform
 import shutil
 import struct
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
+from setuptools.command.install_lib import install_lib
+from setuptools.errors import FileError
 from wheel.bdist_wheel import bdist_wheel
 
 from scripts.build_backend import rust_environment
-from scripts.cargo import target_directory
+from scripts.cargo import build, publish, target_directory
 from scripts.version import sync_version
 
 ROOT = Path(__file__).parent.resolve()
@@ -57,19 +58,12 @@ class BuildNative(build_py):
             if tuple(map(int, requested.split('.'))) < tuple(map(int, minimum.split('.'))):
                 requested = minimum
             environment['MACOSX_DEPLOYMENT_TARGET'] = requested
-        subprocess.run([cargo, 'build', '--release', '--locked', '--target', target],
-                       cwd=ROOT, env=environment, check=True)
+        package = ROOT / 'benchset' if self.editable_mode else Path(self.build_lib) / 'benchset'
+        metadata = build(ROOT, [cargo, 'build', '--release', '--locked', '--target', target], environment)
         filename = 'benchset.dll' if sys.platform == 'win32' else (
             'libbenchset.dylib' if sys.platform == 'darwin' else 'libbenchset.so'
         )
-        package = ROOT / 'benchset' if self.editable_mode else Path(self.build_lib) / 'benchset'
-        destination = package / '_native'
-        destination.mkdir(parents=True, exist_ok=True)
-        # Readers keep the old complete library until its replacement is ready.
-        with tempfile.TemporaryDirectory(dir=destination) as temporary:
-            staged = Path(temporary) / filename
-            shutil.copy2(target_directory(ROOT, environment) / target / 'release' / filename, staged)
-            staged.replace(destination / filename)
+        destination = publish(package, target_directory(ROOT, environment) / target / 'release' / filename, metadata).parent
         for old in destination.iterdir():
             if old.name != filename and old.suffix in ('.so', '.dll', '.dylib'):
                 old.unlink(missing_ok=True)
@@ -97,6 +91,41 @@ class DevelopNative(develop):
         super().run()
 
 
+class InstallNative(install_lib):
+    def get_exclusions(self):
+        return super().get_exclusions() | {self._exclude_pkg_path('benchset', '.benchset.publish.lock')}
+
+    def copy_tree(  # noqa: PLR0913 — Preserve the setuptools command signature.
+        self, infile, outfile, preserve_mode=True, preserve_times=True, preserve_symlinks=False, level=1,
+    ):
+        """Filter before copying while retaining the normal command's file policies."""
+        assert preserve_mode
+        assert preserve_times
+        assert not preserve_symlinks
+        if not self.dry_run and not Path(infile).is_dir():
+            raise FileError(f"cannot copy tree '{infile}': not a directory")
+
+        def failed(error):
+            if not self.dry_run:
+                raise FileError(f"error listing files in '{error.filename}': {error.strerror}")
+
+        excluded, outputs = self.get_exclusions(), []
+        for directory, dirs, files in os.walk(infile, followlinks=True, onerror=failed):
+            dirs[:] = [name for name in dirs if not name.startswith('.nfs')]
+            relative = os.path.relpath(directory, infile)
+            target = outfile if relative == os.curdir else os.path.join(outfile, relative)
+            if not self.dry_run:
+                self.mkpath(target)
+            for name in files:
+                destination = os.path.join(target, name)
+                if not name.startswith('.nfs') and destination not in excluded:
+                    if not self.dry_run:
+                        self.copy_file(os.path.join(directory, name), destination,
+                                       preserve_mode, preserve_times, level=level)
+                    outputs.append(destination)
+        return outputs
+
+
 setup(distclass=NativeDistribution, cmdclass={
-    'build_py': BuildNative, 'bdist_wheel': PlatformWheel, 'develop': DevelopNative,
+    'build_py': BuildNative, 'bdist_wheel': PlatformWheel, 'develop': DevelopNative, 'install_lib': InstallNative,
 })

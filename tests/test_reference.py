@@ -40,7 +40,7 @@ from benchset import (
     run_all,
 )
 from benchset._native import Native
-from tests.helpers import assert_result_references
+from tests.helpers import assert_result_references, mock_suite
 from tests.test_semantics import CallbackLibrary, ManagedNative, ResultLibrary
 
 REFERENCE_SCORES = {
@@ -246,6 +246,7 @@ def test_calibration_imports_and_serialization_do_not_load_native_code() -> None
 import ctypes
 import json
 from dataclasses import asdict
+load_native = ctypes.CDLL
 def forbidden(*args, **kwargs):
     raise AssertionError('calibration import must not load native code')
 ctypes.CDLL = forbidden
@@ -258,6 +259,7 @@ assert isinstance(PI_REFERENCE_RUN, ReferenceRun)
 assert isinstance(PI_REFERENCE_RUN.results[0], ReferenceBenchmarkResult)
 assert PI_REFERENCE_RUN.started_at.utcoffset().total_seconds() == 0
 assert json.loads(json.dumps(asdict(PI_REFERENCE_RUN)))['warmup_seconds'] == 1248
+ctypes.CDLL = load_native
 results = [BenchmarkResult('single_core'), run('unknown'),
            BenchmarkRunner().run('multi_core', warmup_seconds=-1)]
 results.extend(run_all(measurement_seconds=0).results)
@@ -587,7 +589,8 @@ def test_run_all_preserves_individual_native_multipliers_and_forwarded_settings(
         return BenchmarkResult(benchmark, status=current_status, score=123.5 if current_status == 'completed' else None,
                                pi_equivalent=ratio if current_status == 'completed' else None)
 
-    monkeypatch.setattr(api, 'run', execute)
+    monkeypatch.setattr(BenchmarkRunner, 'run', lambda _self, name, **options: execute(name, **options))
+    mock_suite(monkeypatch)
     results = run_all(warmup_seconds=0.25, measurement_seconds=0.75, on_progress=callback).results
     for result in results:
         assert_result_references(result)
@@ -633,6 +636,7 @@ def test_cli_preserves_native_ratio_streams_exit_status_and_selection(
                                unstable=status == 'completed')
 
     monkeypatch.setattr(BenchmarkRunner, 'run', execute)
+    mock_suite(monkeypatch)
     assert cli.main(['--bench', benchmark, '--warmup', '0', '--duration', '0.01']) == code
     captured = capsys.readouterr()
     expected_calls = list(BENCHMARKS) if benchmark == 'all' else [benchmark]

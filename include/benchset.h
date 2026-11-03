@@ -69,7 +69,27 @@ typedef void (*BenchsetProgressCallback)(const BenchsetProgress *, void *);
 
 uint32_t benchset_abi_version(void);
 const char *benchset_version(void);
+/* Read once on the calling thread and copy its double without arithmetic.
+ * reader/user are borrowed only during the call; user may be NULL if supported
+ * by reader. reader must not unwind. NULL reader/out returns 0 without calling
+ * reader or modifying output; otherwise aligned writable out receives the value
+ * and the function returns 1. out may alias caller data used by reader. */
+typedef double (*BenchsetDoubleReader)(void *);
+int32_t benchset_copy_double(BenchsetDoubleReader, void *user, double *out);
 int32_t benchset_default_config(BenchsetConfig *out);
+/* UTF-8 byte length, including any embedded NUL. Unknown names return 0. */
+uint32_t benchset_benchmark_id(const uint8_t *name, uint64_t size);
+/* Compare caller-owned host names with borrowed catalog UTF-8 names. A positive
+ * return matches, zero continues, negative stops. Execution mode compares every
+ * entry except the final fallback; validation mode checks the full catalog. */
+typedef int32_t (*BenchsetNameMatcher)(const uint8_t *, uint64_t, void *);
+uint32_t benchset_benchmark_match(BenchsetNameMatcher, void *user, uint32_t execution);
+/* Validation codes: 0 valid, 1 unknown benchmark, 2 warmup, 3 measurement.
+ * Duration validation is independent of representability as a Rust Duration. */
+uint32_t benchset_duration_error(double warmup, double measurement);
+uint32_t benchset_validation_error(uint32_t benchmark, double warmup, double measurement);
+/* Immutable library-lifetime message; nonzero cli selects CLI option names. */
+const char *benchset_validation_message(uint32_t error, uint32_t cli);
 BenchsetHandle *benchset_create(void);
 /* A handle is single-use. Only one run per loaded library may be active.
  * Callbacks run on the calling thread. They must return promptly and must not
@@ -111,6 +131,40 @@ typedef struct {
     uint32_t has_pi_equivalent; /* Absent unless the complete suite succeeded. */
 } BenchsetAggregatedScores;
 typedef struct {
+    uint32_t benchmark, status;
+    double pi_equivalent;
+    uint32_t has_pi_equivalent;
+} BenchsetAggregateInput;
+/* Aggregate caller-owned snapshots. Invalid/incomplete suites have no score.
+ * Any nonzero presence flag means present. NULL inputs is valid only at count 0.
+ * Non-NULL pointers must be aligned and valid; out must be writable, and a
+ * complete-suite input must contain count readable entries. Only NULL is checked.
+ * Returns 0 for invalid NULL pointers, leaving out unchanged; otherwise returns 1. */
+int32_t benchset_aggregate(const BenchsetAggregateInput *, uint64_t count, BenchsetAggregatedScores *out);
+typedef struct {
+    BenchsetAggregateInput value;
+    const uint8_t *name;
+    uint64_t name_size;
+} BenchsetAggregateRequest;
+/* Lazy host primitives: 0 reads status; 1 reads ratio/presence; 2 requests >=;
+ * 3 requests ==; 4 requests log(value.pi_equivalent) for a nonpositive argument;
+ * 5 compares the caller's name with the borrowed UTF-8 name/name_size operand;
+ * 6 reads a fresh ratio in host-name mode, where 1 reads only its presence;
+ * 7 requests exp(value.pi_equivalent) only for finite host-mode overflow.
+ * Operators 2/3 receive an integer operand in value.status. Comparisons return
+ * their truth value in value.has_pi_equivalent; fields 4/7 return a double.
+ * Every nonzero presence/comparison flag and reader return is accepted.
+ * The callback-borrowed buffer must retain its size; only requested fields are read.
+ * Host-name mode compares the shared prefix before checking count, then the core
+ * requests status/ratio/>= for each entry, followed by short-circuit == and logs.
+ * Each host-mode log separately requests presence, then a fresh ratio if present.
+ * With host_names=0, ordered raw IDs and count are checked before host reads.
+ * A zero reader result makes the aggregate unavailable. Reader is required;
+ * other NULL/output rules match benchset_aggregate. */
+typedef int32_t (*BenchsetAggregateReader)(uint64_t index, uint32_t field, BenchsetAggregateRequest *, void *);
+int32_t benchset_aggregate_read(const uint32_t *benchmarks, uint64_t count,
+    BenchsetAggregateReader, void *user, BenchsetAggregatedScores *out, uint32_t host_names);
+typedef struct {
     const BenchsetResultV3 *results; /* Immutable array, borrowed until suite_free. */
     uint64_t result_count;
     BenchsetAggregatedScores aggregated_scores;
@@ -125,6 +179,19 @@ BenchsetSuiteHandle *benchset_suite_create(void);
  * multi_core, stopping after failure/cancellation. Same callback and lifetime
  * rules as benchset_run. Returns the final individual result's status. */
 uint32_t benchset_run_all(BenchsetSuiteHandle *, const BenchsetConfig *, BenchsetSuiteProgressCallback, void *);
+/* Called synchronously after each result and before starting the next benchmark.
+ * The child handle is borrowed only during this callback; use single-run getters
+ * to copy its result, samples and reason. Never free it. Nonzero stops the suite. */
+typedef uint32_t (*BenchsetResultCallback)(uint32_t benchmark, const BenchsetHandle *, void *);
+uint32_t benchset_run_all_observed(BenchsetSuiteHandle *, const BenchsetConfig *, BenchsetSuiteProgressCallback, BenchsetResultCallback, void *);
+/* Called on the calling thread before each child, after checking and copying the
+ * config prefix. The writable copy is borrowed only during this callback; its
+ * benchmark is ignored. Nonzero proceeds to normal validation/execution; zero
+ * aborts with BENCHSET_FAILED and retains the completed prefix without adding a
+ * result. NULL/incompatible configs still publish their normal failed result
+ * without calling this callback. The caller's original config is unchanged. */
+typedef uint32_t (*BenchsetConfigCallback)(uint32_t benchmark, BenchsetConfig *, void *);
+uint32_t benchset_run_all_configured(BenchsetSuiteHandle *, const BenchsetConfig *, BenchsetSuiteProgressCallback, BenchsetResultCallback, BenchsetConfigCallback, void *);
 void benchset_suite_cancel(BenchsetSuiteHandle *);
 /* Getters return 1 on success, 0 on NULL/wrong size/unavailable index, leaving
  * output unchanged on failure. All indices are zero-based. */

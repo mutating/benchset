@@ -77,6 +77,9 @@ jobs:
     - name: Build native library for source tests
       run: python scripts/build_native.py
 
+    - name: Verify the checked Rust metadata snapshot
+      run: git diff --exit-code -- benchset/_metadata.json
+
     - name: Test Rust core with the generated package version
       run: cargo test --locked -- --test-threads=1
 

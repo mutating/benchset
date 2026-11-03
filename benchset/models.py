@@ -1,10 +1,10 @@
 """Public, immutable measurement objects."""
 
-import math
 from dataclasses import dataclass
 from importlib.metadata import version
-from typing import Optional, Tuple
+from typing import Optional, Tuple, cast
 
+from benchset._metadata import DATA
 from benchset.reference import (
     PI_REFERENCE_MACHINE,
     PI_REFERENCE_RUN,
@@ -13,9 +13,10 @@ from benchset.reference import (
 )
 
 __version__ = version('benchset')
-BENCHMARKS = ('single_core', 'multi_core')
-DEFAULT_WARMUP_SECONDS = 120.0
-DEFAULT_MEASUREMENT_SECONDS = 60.0
+_benchmarks = tuple(benchmark['name'] for benchmark in DATA['benchmarks'])
+BENCHMARKS = cast(Tuple[str, str], _benchmarks)
+DEFAULT_WARMUP_SECONDS = DATA['default_warmup_seconds']
+DEFAULT_MEASUREMENT_SECONDS = DATA['default_measurement_seconds']
 
 
 @dataclass(frozen=True)
@@ -85,19 +86,7 @@ class SuiteResult:
 
     @classmethod
     def from_results(cls, results: Tuple[BenchmarkResult, ...]) -> 'SuiteResult':
-        complete = (
-            tuple(result.benchmark for result in results) == BENCHMARKS
-            and all(
-                result.success and result.pi_equivalent is not None
-                and math.isfinite(result.pi_equivalent) and result.pi_equivalent >= 0
-                for result in results
-            )
-        )
-        equivalent: Optional[float] = None
-        if complete:
-            equivalent = (
-                0.0 if any(result.pi_equivalent == 0 for result in results)
-                else math.exp(sum(math.log(result.pi_equivalent) for result in results
-                                  if result.pi_equivalent is not None) / len(results))
-            )
-        return cls(results, AggregatedScores(pi_equivalent=equivalent))
+        # Load Rust only when computing, preserving the native-free constructor.
+        from benchset._aggregate import aggregate  # noqa: PLC0415
+
+        return cls(results, AggregatedScores(pi_equivalent=aggregate(results)))

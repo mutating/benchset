@@ -14,6 +14,12 @@ const ABI_VERSION: u32 = 1;
 #[path = "suite_ffi.rs"]
 mod suite;
 
+#[path = "aggregation_ffi.rs"]
+mod aggregation;
+
+#[path = "config_ffi.rs"]
+mod config;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -226,6 +232,22 @@ pub extern "C" fn benchset_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
 }
 
+pub type DoubleReader = Option<unsafe extern "C" fn(*mut c_void) -> f64>;
+
+/// Copy one caller-converted double without floating arithmetic or classification.
+#[no_mangle]
+pub unsafe extern "C" fn benchset_copy_double(
+    reader: DoubleReader,
+    user: *mut c_void,
+    out: *mut f64,
+) -> i32 {
+    let Some(reader) = reader.filter(|_| !out.is_null()) else {
+        return 0;
+    };
+    out.write(reader(user));
+    1
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn benchset_default_config(out: *mut Config) -> i32 {
     if out.is_null() {
@@ -304,9 +326,8 @@ unsafe fn execute(
         }
         let config = config.read();
         requested = Some((config.warmup_seconds, config.measurement_seconds));
-        benchmark = match config.benchmark {
-            1 => Benchmark::SingleCore,
-            2 => Benchmark::MultiCore,
+        benchmark = match Benchmark::from_id(config.benchmark) {
+            Some(value) => value,
             _ => return BenchmarkResult::failed(benchmark, options, "unknown benchmark".into()),
         };
         if config.reserved != 0 {
@@ -316,10 +337,16 @@ unsafe fn execute(
                 "reserved config field must be zero".into(),
             );
         }
-        let warmup = Duration::try_from_secs_f64(config.warmup_seconds);
-        let measurement = Duration::try_from_secs_f64(config.measurement_seconds);
-        options = match (warmup, measurement) {
-            (Ok(warmup), Ok(measurement)) if config.measurement_seconds > 0.0 => Options {
+        let durations =
+            (self::config::duration_error(config.warmup_seconds, config.measurement_seconds) == 0)
+                .then(|| {
+                    (
+                        Duration::try_from_secs_f64(config.warmup_seconds),
+                        Duration::try_from_secs_f64(config.measurement_seconds),
+                    )
+                });
+        options = match durations {
+            Some((Ok(warmup), Ok(measurement))) => Options {
                 warmup,
                 measurement,
             },

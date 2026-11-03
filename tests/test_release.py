@@ -302,8 +302,9 @@ def test_release_snapshot_preserves_main_and_can_be_checked_out(source: Path) ->
     assert 'path: "Artifacts/' not in manifest
     swift = shutil.which('swift')
     if swift:
+        # Cold Swift module caches can take over a minute on shared runners.
         parsed = subprocess.run([swift, 'package', '--package-path', str(source), 'dump-package'],
-                                capture_output=True, text=True, check=False, timeout=60)
+                                capture_output=True, text=True, check=False, timeout=180)
         assert parsed.returncode == 0, parsed.stderr
         targets = {target['name']: target for target in json.loads(parsed.stdout)['targets']}
         assert targets['CBenchset']['url'] == (

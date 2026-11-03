@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import os
 import runpy
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zipfile import ZipFile
 
 import pytest
 import setuptools  # type: ignore[import-untyped]
 from setuptools.command.build_py import build_py  # type: ignore[import-untyped]
 from setuptools.command.develop import develop  # type: ignore[import-untyped]
 from wheel.bdist_wheel import bdist_wheel  # type: ignore[import-untyped]
+from wheel.wheelfile import WheelFile  # type: ignore[import-untyped]
 
 from scripts import version
 
@@ -89,6 +93,7 @@ def test_native_build_installs_fresh_target_binary_in_wheel_or_editable_package(
     library, even if copying fails. Both editable installs and wheel staging
     use this path; interrupted staging must leave no extra package files.
     Cargo's child environment controls the output path, including relative paths.
+    The wheel/editable package must receive the matching Rust metadata snapshot.
     """
     editable, deployment, cargo_output = mode
     system, machine, target, filename = configuration
@@ -110,7 +115,8 @@ def test_native_build_installs_fresh_target_binary_in_wheel_or_editable_package(
 
     def compile_(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(arguments)
-        assert arguments == ['/prepared/cargo', 'build', '--release', '--locked', '--target', target]
+        assert arguments == ['/prepared/cargo', 'build', '--release', '--locked', '--target', target,
+                             '--message-format=json-render-diagnostics']
         assert kwargs['cwd'] == tmp_path
         assert kwargs['check'] is True
         if system == 'darwin':
@@ -118,9 +124,13 @@ def test_native_build_installs_fresh_target_binary_in_wheel_or_editable_package(
             assert kwargs['env']['MACOSX_DEPLOYMENT_TARGET'] == ('14.0' if deployment == '14.0' else minimum)
         compiled.parent.mkdir(parents=True, exist_ok=True)
         compiled.write_bytes(b'fresh compiler output for ' + target.encode())
-        return subprocess.CompletedProcess(arguments, 0)
+        metadata = compiled.parent / 'reported-build-script-output/metadata.json'
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        metadata.write_text('{"fresh": true}\n')
+        message = {'reason': 'build-script-executed', 'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(metadata).hex()]]}
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(message) + '\n')
 
-    monkeypatch.setattr(setup_module['subprocess'], 'run', compile_)
+    monkeypatch.setattr(subprocess, 'run', compile_)
     command = setup_module['distribution'].get_command_obj('build_py')
     command.build_lib = str(tmp_path / 'wheel-staging')
     command.editable_mode = editable
@@ -144,6 +154,7 @@ def test_native_build_installs_fresh_target_binary_in_wheel_or_editable_package(
     monkeypatch.setattr(setup_module['shutil'], 'copy2', copy_with_reader)
     command.run()
     assert (destination / filename).read_bytes() == compiled.read_bytes()
+    assert (destination.parent / '_metadata.json').read_text() == '{"fresh": true}\n'
     assert (destination / 'metadata.txt').read_text() == 'keep only metadata'
     previous = installed.read_bytes()
     with pytest.raises(OSError, match='copy interrupted'):
@@ -206,3 +217,44 @@ def test_legacy_editable_install_builds_in_place_but_uninstall_does_not_compile(
     command.run()
     expected: list[tuple[str, Any]] = [('develop', None)] if uninstall else [('build_py', True), ('develop', None)]
     assert calls == expected
+
+
+@pytest.mark.parametrize('relative_install_path', [False, True])
+def test_registered_native_installer_excludes_only_the_package_publication_lock_from_wheels(
+    setup_module: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_install_path: bool,
+) -> None:
+    """Keep the persistent build lock out of actual wheel payloads without unlinking it.
+
+    Package-data/manifest exclusions do not control install_lib.copy_tree: the
+    lock is created in build_lib after Python files were collected. Exercise
+    the registered install command and real WheelFile assembly, including the
+    relative '/./' install_dir spelling used by bdist_wheel. Preserve all other
+    files, including an unrelated package's equally named lock file.
+    """
+    build, installed = tmp_path / 'build-lib', tmp_path / 'wheel-staging'
+    contents = {
+        'benchset/__init__.py': b'',
+        'benchset/_metadata.json': b'{}',
+        'benchset/_native/libbenchset.so': b'native image',
+        'benchset/.benchset.publish.lock': b'held lock inode',
+        'benchset/keep.lock': b'ordinary package data',
+        'other/.benchset.publish.lock': b'unrelated package data',
+    }
+    for name, content in contents.items():
+        source = build / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(content)
+    monkeypatch.chdir(tmp_path)
+    command = setup_module['distribution'].get_command_obj('install_lib')
+    command.build_dir = str(build)
+    command.install_dir = 'wheel-staging/./' if relative_install_path else str(installed)
+    command.install()
+    wheel = tmp_path / 'benchset-1.2.3-py3-none-any.whl'
+    with WheelFile(str(wheel), 'w') as archive:
+        archive.write_files(str(installed))
+    with ZipFile(wheel) as archive:
+        assert 'benchset/.benchset.publish.lock' not in archive.namelist()
+        for name, content in contents.items():
+            if name != 'benchset/.benchset.publish.lock':
+                assert archive.read(name) == content
+    assert (build / 'benchset/.benchset.publish.lock').read_bytes() == b'held lock inode'

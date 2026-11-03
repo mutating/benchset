@@ -42,6 +42,10 @@ private let piReference = try! loadReference(using: .live)
 public let piReferenceMachine: ReferenceMachine = piReference.machine
 public let piReferenceRun: ReferenceRun = piReference.run
 
+private let nativeDefaults = loadDefaults(using: .live)
+public let defaultWarmupSeconds = nativeDefaults.warmup_seconds
+public let defaultMeasurementSeconds = nativeDefaults.measurement_seconds
+
 public struct Progress {
     public let phase: UInt32
     public let workers: UInt32
@@ -98,15 +102,16 @@ public struct SuiteResult {
 
     public init(results: [BenchmarkResult]) {
         self.results = results
-        let complete = results.map { $0.benchmark } == [.singleCore, .multiCore]
-            && results.allSatisfy {
-                $0.success && $0.piEquivalent.map { $0.isFinite && $0 >= 0 } == true
-            }
-        let equivalent: Double?
-        if !complete { equivalent = nil }
-        else if results.contains(where: { $0.piEquivalent == 0 }) { equivalent = 0 }
-        else { equivalent = exp(results.reduce(0) { $0 + log($1.piEquivalent!) } / Double(results.count)) }
-        self.aggregatedScores = AggregatedScores(piEquivalent: equivalent)
+        let inputs = results.map {
+            BenchsetAggregateInput(benchmark: $0.benchmark.rawValue, status: $0.status,
+                                  pi_equivalent: $0.piEquivalent ?? 0,
+                                  has_pi_equivalent: $0.piEquivalent == nil ? 0 : 1)
+        }
+        var scores = BenchsetAggregatedScores()
+        _ = inputs.withUnsafeBufferPointer { benchset_aggregate($0.baseAddress, UInt64($0.count), &scores) }
+        self.aggregatedScores = AggregatedScores(
+            piEquivalent: scores.has_pi_equivalent == 0 ? nil : scores.pi_equivalent
+        )
     }
 }
 
@@ -164,6 +169,21 @@ internal final class CallbackContext {
 // A private function table keeps ownership/error handling testable without
 // changing the public Swift API or replacing the benchmark algorithm.
 internal typealias NativeCallback = @convention(c) (UnsafePointer<BenchsetProgress>?, UnsafeMutableRawPointer?) -> Void
+internal typealias NativeSuiteCallback = @convention(c) (UnsafePointer<BenchsetSuiteProgress>?, UnsafeMutableRawPointer?) -> Void
+internal typealias NativeResultCallback = @convention(c) (UInt32, OpaquePointer?, UnsafeMutableRawPointer?) -> UInt32
+internal struct SuiteAPI {
+    var create: () -> OpaquePointer?
+    var run: (OpaquePointer, UnsafePointer<BenchsetConfig>, NativeSuiteCallback, NativeResultCallback, UnsafeMutableRawPointer) -> UInt32
+    var cancel: (OpaquePointer) -> Void
+    var free: (OpaquePointer) -> Void
+
+    static let live = SuiteAPI(
+        create: { benchset_suite_create() },
+        run: { benchset_run_all_observed($0, $1, $2, $3, $4) },
+        cancel: { benchset_suite_cancel($0) }, free: { benchset_suite_free($0) }
+    )
+}
+
 internal struct NativeAPI {
     var abiVersion: () -> UInt32
     var create: () -> OpaquePointer?
@@ -175,6 +195,7 @@ internal struct NativeAPI {
     var reason: (OpaquePointer) -> UnsafePointer<CChar>?
     var version: () -> UnsafePointer<CChar>
     var free: (OpaquePointer) -> Void
+    var suite: SuiteAPI = .live
 
     static let live = NativeAPI(
         abiVersion: { benchset_abi_version() },
@@ -186,14 +207,60 @@ internal struct NativeAPI {
     )
 }
 
+internal func loadDefaults(using native: NativeAPI) -> BenchsetConfig {
+    var config = BenchsetConfig()
+    guard native.abiVersion() == BENCHSET_ABI_VERSION, native.defaultConfig(&config) == 1 else {
+        return BenchsetConfig()
+    }
+    return config
+}
+
 internal func forwardProgress(_ pointer: UnsafePointer<BenchsetProgress>?, _ rawContext: UnsafeMutableRawPointer?) {
     guard let value = pointer?.pointee, let rawContext = rawContext else { return }
     let context = Unmanaged<CallbackContext>.fromOpaque(rawContext).takeUnretainedValue()
-    context.callback(Progress(
+    context.callback(copyProgress(value))
+}
+
+private func copyProgress(_ value: BenchsetProgress) -> Progress {
+    Progress(
         phase: value.phase, workers: value.workers, fraction: value.fraction,
         phaseElapsedSeconds: value.phase_elapsed_seconds,
         phaseDurationSeconds: value.phase_duration_seconds, iterations: value.iterations
-    ))
+    )
+}
+
+internal final class SuiteCallbackContext {
+    let native: NativeAPI
+    let callback: (Benchmark, Progress) -> Void
+    var results: [BenchmarkResult] = []
+    var error: Error?
+
+    init(native: NativeAPI, callback: @escaping (Benchmark, Progress) -> Void) {
+        self.native = native
+        self.callback = callback
+    }
+}
+
+internal func forwardSuiteProgress(_ pointer: UnsafePointer<BenchsetSuiteProgress>?, _ rawContext: UnsafeMutableRawPointer?) {
+    guard let value = pointer?.pointee, let rawContext = rawContext else { return }
+    let context = Unmanaged<SuiteCallbackContext>.fromOpaque(rawContext).takeUnretainedValue()
+    guard let benchmark = Benchmark(rawValue: value.benchmark) else {
+        context.error = BenchsetError.resultUnavailable
+        return
+    }
+    context.callback(benchmark, copyProgress(value.progress))
+}
+
+internal func forwardSuiteResult(_ id: UInt32, _ handle: OpaquePointer?, _ rawContext: UnsafeMutableRawPointer?) -> UInt32 {
+    guard let rawContext = rawContext else { return 1 }
+    let context = Unmanaged<SuiteCallbackContext>.fromOpaque(rawContext).takeUnretainedValue()
+    guard let benchmark = Benchmark(rawValue: id), let handle = handle else {
+        context.error = BenchsetError.resultUnavailable
+        return 1
+    }
+    do { context.results.append(try readResult(using: context.native, handle: handle, benchmark: benchmark)) }
+    catch { context.error = error }
+    return context.error == nil ? 0 : 1
 }
 
 /// Run from a background queue. Callbacks execute on that queue, not the UI queue.
@@ -201,9 +268,7 @@ internal func forwardProgress(_ pointer: UnsafePointer<BenchsetProgress>?, _ raw
 public final class BenchmarkRunner {
     private let lock = NSLock()
     private let native: NativeAPI
-    private var handle: OpaquePointer?
-    // nil outside runAll; otherwise keep cancellation across its native handles.
-    private var suiteCancelled: Bool?
+    private var active: (handle: OpaquePointer, cancel: (OpaquePointer) -> Void, free: (OpaquePointer) -> Void)?
 
     public init() { self.native = .live }
     internal init(native: NativeAPI) { self.native = native }
@@ -211,98 +276,98 @@ public final class BenchmarkRunner {
     public func cancel() {
         lock.lock()
         defer { lock.unlock() }
-        if suiteCancelled != nil { suiteCancelled = true }
-        if let handle = handle { native.cancel(handle) }
+        if let active = active { active.cancel(active.handle) }
     }
 
-    /// Run singleCore then multiCore, stopping after failure or cancellation.
+    /// Run the native suite. Rust owns its order, early stopping and cancellation.
     public func runAll(
-        warmupSeconds: Double = 120,
-        measurementSeconds: Double = 60,
+        warmupSeconds: Double = defaultWarmupSeconds,
+        measurementSeconds: Double = defaultMeasurementSeconds,
         onProgress: @escaping (Benchmark, Progress) -> Void = { _, _ in }
     ) throws -> SuiteResult {
-        lock.lock()
-        guard handle == nil && suiteCancelled == nil else { lock.unlock(); throw BenchsetError.alreadyRunning }
-        suiteCancelled = false
-        lock.unlock()
-        defer {
-            lock.lock()
-            suiteCancelled = nil
-            lock.unlock()
+        let current = try acquire(create: native.suite.create, cancel: native.suite.cancel, free: native.suite.free)
+        defer { release() }
+        var config = try configuration(warmupSeconds: warmupSeconds, measurementSeconds: measurementSeconds)
+        let context = SuiteCallbackContext(native: native, callback: onProgress)
+        _ = withExtendedLifetime(context) {
+            native.suite.run(current, &config, forwardSuiteProgress, forwardSuiteResult,
+                             Unmanaged.passUnretained(context).toOpaque())
         }
-        var results: [BenchmarkResult] = []
-        for benchmark in [Benchmark.singleCore, .multiCore] {
-            let result = try runBenchmark(
-                benchmark, warmupSeconds: warmupSeconds, measurementSeconds: measurementSeconds,
-                inSuite: true,
-                onProgress: { onProgress(benchmark, $0) }
-            )
-            results.append(result)
-            if !result.success { break }
-        }
-        return SuiteResult(results: results)
+        if let error = context.error { throw error }
+        return SuiteResult(results: context.results)
     }
 
     public func run(
         _ benchmark: Benchmark,
-        warmupSeconds: Double = 120,
-        measurementSeconds: Double = 60,
+        warmupSeconds: Double = defaultWarmupSeconds,
+        measurementSeconds: Double = defaultMeasurementSeconds,
         onProgress: @escaping (Progress) -> Void = { _ in }
     ) throws -> BenchmarkResult {
-        try runBenchmark(benchmark, warmupSeconds: warmupSeconds, measurementSeconds: measurementSeconds,
-                         inSuite: false, onProgress: onProgress)
-    }
-
-    private func runBenchmark(
-        _ benchmark: Benchmark, warmupSeconds: Double, measurementSeconds: Double,
-        inSuite: Bool, onProgress: @escaping (Progress) -> Void
-    ) throws -> BenchmarkResult {
-        lock.lock()
-        guard handle == nil && (suiteCancelled == nil || inSuite) else { lock.unlock(); throw BenchsetError.alreadyRunning }
-        guard native.abiVersion() == BENCHSET_ABI_VERSION else { lock.unlock(); throw BenchsetError.resultUnavailable }
-        guard let current = native.create() else { lock.unlock(); throw BenchsetError.allocationFailed }
-        handle = current
-        if suiteCancelled == true { native.cancel(current) }
-        lock.unlock()
-        defer {
-            lock.lock()
-            handle = nil
-            native.free(current)
-            lock.unlock()
-        }
-        var config = BenchsetConfig()
-        guard native.defaultConfig(&config) == 1 else { throw BenchsetError.resultUnavailable }
+        let current = try acquire(create: native.create, cancel: native.cancel, free: native.free)
+        defer { release() }
+        var config = try configuration(warmupSeconds: warmupSeconds, measurementSeconds: measurementSeconds)
         config.benchmark = benchmark.rawValue
-        config.warmup_seconds = warmupSeconds
-        config.measurement_seconds = measurementSeconds
         let context = CallbackContext(onProgress)
         _ = withExtendedLifetime(context) {
             native.run(current, &config, forwardProgress, Unmanaged.passUnretained(context).toOpaque())
         }
-        var extended = BenchsetResultV2()
-        guard native.result(current, &extended, UInt32(MemoryLayout<BenchsetResultV2>.size)) == 1 else {
-            throw BenchsetError.resultUnavailable
-        }
-        let result = extended.base
-        var samples: [Sample] = []
-        for index in 0..<result.sample_count {
-            var sample = BenchsetSample()
-            guard native.sample(current, index, &sample) == 1 else { throw BenchsetError.resultUnavailable }
-            samples.append(Sample(elapsedSeconds: sample.elapsed_seconds,
-                                  durationSeconds: sample.duration_seconds, iterations: sample.iterations,
-                                  iterationsPerSecond: sample.iterations_per_second))
-        }
-        let reason = native.reason(current).map { String(cString: $0) }
-        return BenchmarkResult(
-            benchmark: benchmark, version: String(cString: native.version()), status: result.status,
-            reason: reason?.isEmpty == false ? reason : nil,
-            score: result.status == BENCHSET_COMPLETED ? result.score : nil, workers: result.workers,
-            warmupSeconds: result.warmup_seconds, measurementSeconds: result.measurement_seconds,
-            elapsedSeconds: result.elapsed_seconds, iterations: result.iterations, checksum: result.checksum,
-            samples: samples, variationPercent: result.has_variation != 0 ? result.variation_percent : nil,
-            unstable: result.unstable != 0,
-            piEquivalent: result.status == BENCHSET_COMPLETED && extended.has_pi_equivalent != 0
-                ? extended.pi_equivalent : nil
-        )
+        return try readResult(using: native, handle: current, benchmark: benchmark)
     }
+
+    private func acquire(
+        create: () -> OpaquePointer?, cancel: @escaping (OpaquePointer) -> Void,
+        free: @escaping (OpaquePointer) -> Void
+    ) throws -> OpaquePointer {
+        lock.lock()
+        defer { lock.unlock() }
+        guard active == nil else { throw BenchsetError.alreadyRunning }
+        guard native.abiVersion() == BENCHSET_ABI_VERSION else { throw BenchsetError.resultUnavailable }
+        guard let current = create() else { throw BenchsetError.allocationFailed }
+        active = (current, cancel, free)
+        return current
+    }
+
+    private func release() {
+        lock.lock()
+        defer { lock.unlock() }
+        let current = active!
+        active = nil
+        current.free(current.handle)
+    }
+
+    private func configuration(warmupSeconds: Double, measurementSeconds: Double) throws -> BenchsetConfig {
+        var config = BenchsetConfig()
+        guard native.defaultConfig(&config) == 1 else { throw BenchsetError.resultUnavailable }
+        config.warmup_seconds = warmupSeconds
+        config.measurement_seconds = measurementSeconds
+        return config
+    }
+}
+
+internal func readResult(using native: NativeAPI, handle: OpaquePointer, benchmark: Benchmark) throws -> BenchmarkResult {
+    var extended = BenchsetResultV2()
+    guard native.result(handle, &extended, UInt32(MemoryLayout<BenchsetResultV2>.size)) == 1 else {
+        throw BenchsetError.resultUnavailable
+    }
+    let result = extended.base
+    var samples: [Sample] = []
+    for index in 0..<result.sample_count {
+        var sample = BenchsetSample()
+        guard native.sample(handle, index, &sample) == 1 else { throw BenchsetError.resultUnavailable }
+        samples.append(Sample(elapsedSeconds: sample.elapsed_seconds,
+                              durationSeconds: sample.duration_seconds, iterations: sample.iterations,
+                              iterationsPerSecond: sample.iterations_per_second))
+    }
+    let reason = native.reason(handle).map { String(cString: $0) }
+    return BenchmarkResult(
+        benchmark: benchmark, version: String(cString: native.version()), status: result.status,
+        reason: reason?.isEmpty == false ? reason : nil,
+        score: result.status == BENCHSET_COMPLETED ? result.score : nil, workers: result.workers,
+        warmupSeconds: result.warmup_seconds, measurementSeconds: result.measurement_seconds,
+        elapsedSeconds: result.elapsed_seconds, iterations: result.iterations, checksum: result.checksum,
+        samples: samples, variationPercent: result.has_variation != 0 ? result.variation_percent : nil,
+        unstable: result.unstable != 0,
+        piEquivalent: result.status == BENCHSET_COMPLETED && extended.has_pi_equivalent != 0
+            ? extended.pi_equivalent : nil
+    )
 }
