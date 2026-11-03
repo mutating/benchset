@@ -2,11 +2,14 @@
 
 import _ctypes
 import ctypes
+import signal
 import sys
 from _ctypes import CFuncPtr
 from functools import lru_cache
 from os.path import abspath
 from pathlib import Path
+from threading import current_thread, main_thread
+from types import FrameType
 from typing import TYPE_CHECKING, Any, Callable, List, NoReturn, Optional, Tuple, cast
 
 from benchset._metadata import DATA, canonical_name
@@ -37,7 +40,7 @@ class _Library(_CDLL):
 
 
 @lru_cache(maxsize=1)
-def _load_library(path: str) -> _CDLL:
+def _open_library(path: str) -> _CDLL:
     """Open before constructing ctypes types, rolling back handles that cannot be adopted."""
     if _AsDouble is None:
         return cast(_CDLL, cast(Any, ctypes.cdll)._dlltype(path))
@@ -53,11 +56,63 @@ def _load_library(path: str) -> _CDLL:
         factory = cast(Any, ctypes.cdll)._dlltype
         return cast(_CDLL, (_Library if factory is _CDLL else factory)(path, handle=handle))
     except BaseException:
-        if sys.platform == 'win32':
-            _ctypes.FreeLibrary(handle)
-        else:
-            _ctypes.dlclose(handle)
+        _close_library(handle)
         raise
+
+
+def _close_library(handle: int) -> None:
+    if sys.platform == 'win32':
+        _ctypes.FreeLibrary(handle)
+    else:
+        _ctypes.dlclose(handle)
+
+
+def _shared_library(path: str) -> _CDLL:
+    """Discard surplus opens from concurrent/reentrant misses for the fixed native path."""
+    library = _open_library(path)
+    shared = _open_library(path)
+    if library is not shared and _AsDouble is not None:
+        _close_library(library._handle)
+    return shared
+
+
+def _load_library(path: str) -> _CDLL:
+    """Defer Python SIGINT delivery until the opened image has a cached owner.
+
+    A try/finally cannot protect a C call's return before Python assigns its
+    handle, or a return before lru_cache publishes its value. Keep the original
+    policy and originating frames, delivering signals after either publication
+    or rollback. Python dispatches signal handlers only on the main thread.
+    """
+    handler = signal.getsignal(signal.SIGINT)
+    if current_thread() is not main_thread() or not callable(handler):
+        return _shared_library(path)
+    pending: List[Tuple[int, Optional[FrameType]]] = []
+
+    def defer(signum: int, frame: Optional[FrameType]) -> None:
+        pending.append((signum, frame))
+
+    try:
+        signal.signal(signal.SIGINT, defer)
+    except ValueError:  # Subinterpreters cannot install or receive Python signal handlers.
+        return _shared_library(path)
+    try:
+        return _shared_library(path)
+    finally:
+        try:
+            signal.signal(signal.SIGINT, handler)
+            while pending:
+                arguments = pending.pop(0)
+                try:
+                    callback = signal.getsignal(signal.SIGINT)
+                    if callable(callback):
+                        callback(*arguments)
+                    elif callback != signal.SIG_IGN:
+                        signal.raise_signal(signal.SIGINT)
+                finally:
+                    del arguments
+        finally:
+            pending.clear()  # Frames can refer back to this queue, even with cyclic GC disabled.
 
 
 class _Functions:

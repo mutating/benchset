@@ -22,7 +22,7 @@ from tests.test_resources import (
 
 
 def _clear_standard_loader() -> None:
-    loader = getattr(_native, '_load_library', None)
+    loader = getattr(_native, '_open_library', None)
     if loader is not None:
         loader.cache_clear()
 
@@ -90,7 +90,7 @@ def test_standard_loader_preflights_and_adopts_the_open_handle(monkeypatch: pyte
     secure Windows absolute-path defaults. This is a new private bridge check;
     HEAD had no cached loader helper.
     """
-    loader = getattr(_native, '_load_library', None)
+    loader = getattr(_native, '_open_library', None)
     if loader is None:
         pytest.skip('HEAD has no standard loader helper')
     loader.cache_clear()
@@ -176,7 +176,7 @@ def test_modern_cdll_hook_adopts_the_preopened_handle_without_reopening(
     requested = 'subdir/../adoption-probe.dll'
     expected_path = os.path.abspath(requested) if platform == 'win32' else requested  # noqa: PTH100 — Match CDLL.
     expected_mode = 0x1100 if platform == 'win32' else ctypes.DEFAULT_MODE
-    library = _native._load_library.__wrapped__(requested)
+    library = _native._open_library.__wrapped__(requested)
     assert calls == [('open', expected_path, expected_mode, 701), ('wrapper', expected_path, 701)]
     assert library._handle == 701
     assert library._name == expected_path
@@ -224,7 +224,7 @@ def test_standard_loader_keeps_platform_modes_and_normalizes_windows_path(
     ctypes' legacy alias reproduces modern Windows: the raw platform opener
     must still work without changing ownership, paths or search flags.
     """
-    loader = getattr(_native, '_load_library', None)
+    loader = getattr(_native, '_open_library', None)
     if loader is None:
         pytest.skip('HEAD has no standard loader helper')
     calls: List[Tuple[str, str, object]] = []
@@ -268,7 +268,7 @@ def test_failed_wrapper_adoption_closes_only_its_open_handle_and_retries(  # noq
     own handle, preserve the original error and remain uncached. Recovery then
     adopts and caches its handle without closing the successful image.
     """
-    loader = getattr(_native, '_load_library', None)
+    loader = getattr(_native, '_open_library', None)
     if loader is None:
         pytest.skip('HEAD has no pre-opened wrapper adoption helper')
     loader.cache_clear()
@@ -341,7 +341,7 @@ def test_failed_raw_open_never_constructs_or_closes_a_wrapper(
     _dlopen returned a real handle, while a recovered successful image remains
     open. Both close entry points are intercepted on every host.
     """
-    loader = getattr(_native, '_load_library', None)
+    loader = getattr(_native, '_open_library', None)
     if loader is None:
         pytest.skip('HEAD has no pre-opened wrapper adoption helper')
     loader.cache_clear()
