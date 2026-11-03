@@ -28,6 +28,8 @@ def test_cli_sigint_during_native_loading_cancels_reports_and_releases_before_re
     makes a worker-side loader wait for observed cancellation without sleeps.
     Two calls on the same runner check restoration, joined workers and exact
     native handle release independently of Thread's own completion bookkeeping.
+    Acknowledge cancellation only after the runner's flag is committed, so a
+    free-threaded loader cannot resume between notification and cancellation.
     """
     runner = BenchmarkRunner()
     cancelled = Event()
@@ -80,9 +82,15 @@ def test_cli_sigint_during_native_loading_cancels_reports_and_releases_before_re
         released.append(identity)
         original_free(native, handle, *arguments)
 
+    def acknowledge() -> None:
+        if not cancelled.is_set():
+            committed = runner._active is not None and runner._active.cancelled
+            cancelled.set()  # Always release the worker, including a broken fixture's assertion path.
+            assert committed, 'the loader was acknowledged before cancellation was committed'
+
     def cancel() -> None:
-        cancelled.set()
         original_cancel()
+        acknowledge()
 
     class Worker(Thread):
         def __init__(self, *arguments: Any, **options: Any) -> None:

@@ -465,7 +465,7 @@ def test_reentrant_loading_releases_the_surplus_reference(
     opened: List[int] = []
     closed: List[int] = []
     nested: List[object] = []
-    requested = str(Path('reentrant-probe').resolve())
+    requested = os.path.abspath('reentrant-probe')  # noqa: PTH100 — Match ctypes on legacy Windows too.
     monkeypatch.setattr(_native, 'sys', SimpleNamespace(platform=platform))
 
     def open_image(path: str, _mode: int) -> int:
