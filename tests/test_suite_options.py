@@ -180,9 +180,12 @@ def test_second_child_conversion_exceptions_escape_after_cleanup_and_allow_reuse
 
 
 @pytest.mark.parametrize('window', ['warmup', 'measurement'])
-@pytest.mark.parametrize('policy', ['default', 'handled', 'custom', 'ignored'])
-def test_sigint_during_second_conversion_interrupts_caller_immediately(
-    monkeypatch: pytest.MonkeyPatch, window: str, policy: str,
+@pytest.mark.parametrize(('policy', 'second_no_work'), [
+    ('default', False), ('handled', False), ('custom', False), ('ignored', False),
+    ('handled', True), ('custom', True), ('ignored', True),
+])
+def test_sigint_during_second_conversion_interrupts_caller_immediately(  # noqa: PLR0915 — Keep signal identity, events and native cleanup in one lifetime.
+    monkeypatch: pytest.MonkeyPatch, window: str, policy: str, second_no_work: bool,
 ) -> None:
     """Legacy child conversions run under the caller's ordinary SIGINT policy.
 
@@ -190,6 +193,8 @@ def test_sigint_during_second_conversion_interrupts_caller_immediately(
     its next statement or another conversion. The native callback catches the
     original KeyboardInterrupt until workers and handles are cleaned up, then
     returns that same exception without attaching its private transport error.
+    A nanosecond second window forces NoWork without changing conversion or
+    signal semantics, as can happen when a busy CI runner starts its workers.
     """
     events: List[str] = []
     raised: List[KeyboardInterrupt] = []
@@ -214,7 +219,7 @@ def test_sigint_during_second_conversion_interrupts_caller_immediately(
     runner = BenchmarkRunner()
     monkeypatch.setattr(api, 'BenchmarkRunner', lambda: runner)
     warmup = Seconds('warmup', (0.0, 0.0), events)
-    measurement = Seconds('measurement', (0.1, 0.1), events)
+    measurement = Seconds('measurement', (0.1, 1e-9 if second_no_work else 0.1), events)
     handler = custom_handler if policy == 'custom' else (
         signal.SIG_IGN if policy == 'ignored' else signal.default_int_handler
     )
@@ -234,7 +239,16 @@ def test_sigint_during_second_conversion_interrupts_caller_immediately(
             except KeyboardInterrupt:
                 pytest.fail('the caller handled SIGINT and the suite must continue')
             assert len(suite.results) == 2
-            assert all(result.success for result in suite.results)
+            assert suite.results[0].success, suite
+            second = suite.results[1]
+            if second_no_work:
+                assert second.status == 'failed', second
+            if not second.success:
+                assert second.status == 'failed', second
+                assert second.reason == 'measurement window was too short to complete any work', second
+                assert second.iterations == 0 or second.elapsed_seconds == 0, second
+                assert second.score is None
+                assert second.pi_equivalent is None
             assert len(raised) == (1 if policy == 'handled' else 0)
         assert signal.getsignal(signal.SIGINT) is handler
         expected = ['warmup:1', 'measurement:1', 'start:single_core', 'completed:single_core', 'warmup:2']
@@ -246,9 +260,9 @@ def test_sigint_during_second_conversion_interrupts_caller_immediately(
             expected.append('after-signal')
             if window == 'warmup':
                 expected.append('measurement:2')
-            expected.extend(['start:multi_core', 'completed:multi_core'])
+            expected.extend(['start:multi_core', second.status + ':multi_core'])
         assert events == expected
-        assert runner.run('single_core', warmup_seconds=0, measurement_seconds=0.1).success
+        assert_runner_reusable(runner)
     finally:
         signal.signal(signal.SIGINT, previous)
 

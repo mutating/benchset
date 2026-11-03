@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "benchset"
-version = "0.0.7"
+version = "0.0.8"
 authors = [
   { name="Evgeniy Blinov", email="zheni-b@yandex.ru" },
 ]
