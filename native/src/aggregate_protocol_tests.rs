@@ -207,6 +207,8 @@ const COMPLETE: [(u64, u32); 16] = [
 
 /// Host names use exact borrowed UTF-8 and canonical operands, ignore raw IDs,
 /// accept noncanonical true flags, and compare the common prefix before length.
+/// Counts above 32 bits still compare both names and cannot match a short suite
+/// after narrowing on a 32-bit target.
 #[test]
 fn host_names_preserve_operands_prefix_and_nonzero_flags() {
     for flag in [1, 7, u32::MAX] {
@@ -220,7 +222,7 @@ fn host_names_preserve_operands_prefix_and_nonzero_flags() {
         assert_eq!(scores.pi_equivalent, 1.0);
         assert_eq!(state.calls, trace(&COMPLETE, state.ratios));
     }
-    for count in [0, 1, 3, u64::MAX] {
+    for count in [0, 1, 3, 1 << 32, (1 << 32) + 1, (1 << 32) + 2, u64::MAX] {
         let mut state = ReaderState::default();
         let scores = execute(&mut state, count, 1);
         assert_eq!(scores.has_pi_equivalent, 0);

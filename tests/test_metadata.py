@@ -312,14 +312,18 @@ print('native-free metadata')
 
 
 @pytest.mark.parametrize('failure', [None, 'compile', 'missing', 'duplicate', 'read', 'copy', 'incoming-copy', 'write', 'library-replace', 'replace'])
+@pytest.mark.parametrize('prefix', ['', ' \t', '\r '])
 def test_build_publishes_exact_reported_metadata_atomically(  # noqa: PLR0915 — one publication contract across failure boundaries.
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, prefix: str,
 ) -> None:
     """Publish the current Cargo-reported snapshot without guessing an output path.
 
     A stale file in the conventional target directory and an unrelated build
     event catch path guessing. Compilation/report/read/copy/write failures
     retain both installed files, including failures at either replacement.
+    Unicode separators and wrapper diagnostics must not interfere with the
+    JSON stream, including valid leading JSON whitespace. A cached marker still pointing to an old target directory
+    must resolve its snapshot in the current Cargo out_dir.
     Staging both products before replacing either prevents interrupted copies
     from mixing new metadata with an old library. Failures clean staging files.
     """
@@ -333,17 +337,23 @@ def test_build_publishes_exact_reported_metadata_atomically(  # noqa: PLR0915 �
     stale = tmp_path / 'target/release/benchset-metadata.json'
     stale.parent.mkdir(parents=True)
     stale.write_bytes(b'stale metadata')
-    fresh = tmp_path / 'custom-output-π-данные/build-script-out/benchset-metadata.json'
+    output = tmp_path / 'custom-output-π-данные\u2028\u2029\x85'
+    fresh = output / 'build-script-out/benchset-metadata.json'
     fresh.parent.mkdir(parents=True)
     fresh.write_bytes(b'fresh complete snapshot')
     compiled = fresh.parent / library.name
     compiled.write_bytes(b'fresh complete library')
     records = [
-        {'reason': 'compiler-artifact'},
+        {'reason': 'build-script-executed', 'out_dir': str(output), 'message': 'wrapper log'},
+        {'reason': 'build-script-executed', 'out_dir': str(output), 'env': {'wrapper': 'not Cargo'}},
+        {'reason': 'build-script-executed', 'out_dir': str(output), 'env': ['wrapper', ['unpaired']]},
+        {'reason': 'build-script-executed', 'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(stale).hex()]]},
+        {'reason': 'compiler-artifact', 'filenames': [str(compiled)]},
         {'reason': 'build-script-executed', 'env': [['UNRELATED_PATH', str(stale)]]},
-        {'reason': 'build-script-executed', 'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(fresh).hex()]]},
+        {'reason': 'build-script-executed', 'out_dir': str(fresh.parent),
+         'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(stale).hex()]]},
     ]
-    environment = {'CARGO_TARGET_DIR': str(tmp_path / 'custom-output-π-данные')}
+    environment = {'CARGO_TARGET_DIR': str(output)}
 
     def compile_(arguments: list, **options: object) -> subprocess.CompletedProcess:
         assert arguments == ['selected-cargo', 'build', '--message-format=json-render-diagnostics']
@@ -357,7 +367,10 @@ def test_build_publishes_exact_reported_metadata_atomically(  # noqa: PLR0915 �
             records.append(records[-1])
         if failure == 'read':
             fresh.unlink()
-        return subprocess.CompletedProcess(arguments, 0, stdout='\n'.join(json.dumps(record, ensure_ascii=False) for record in records))
+        messages = '\n'.join(prefix + json.dumps(record, ensure_ascii=False) for record in records)
+        return subprocess.CompletedProcess(
+            arguments, 0, stdout='rustc wrapper diagnostic\n{rustc-wrapper} compiling benchset\n' + messages + '\n',
+        )
 
     monkeypatch.setattr(subprocess, 'run', compile_)
     replace = Path.replace

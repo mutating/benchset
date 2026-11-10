@@ -12,7 +12,8 @@
 #include <unistd.h>
 #endif
 
-/** Both entrypoints must reject a readable prefix without touching the inaccessible tail. */
+/** Reject invalid prefixes without reading their tail, and reject null or
+ * already used handles before reading any config bytes. */
 int main(void) {
     size_t page_size;
     unsigned char *pages;
@@ -44,6 +45,9 @@ int main(void) {
         {BENCHSET_ABI_VERSION, sizeof(BenchsetConfig) + 1},
     };
     unsigned char *prefix = pages + page_size - sizeof(struct Prefix);
+    const BenchsetConfig *protected_config = (const BenchsetConfig *)(pages + page_size);
+    assert(benchset_run(NULL, protected_config, NULL, NULL) == BENCHSET_FAILED);
+    assert(benchset_run_all(NULL, protected_config, NULL, NULL) == BENCHSET_FAILED);
     for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
         memcpy(prefix, &invalid[index], sizeof(struct Prefix));
         BenchsetHandle *handle = benchset_create();
@@ -53,6 +57,7 @@ int main(void) {
         assert(benchset_result(handle, &result) == 1);
         assert(result.status == BENCHSET_FAILED && result.iterations == 0 && result.sample_count == 0);
         assert(strstr(benchset_reason(handle), "incompatible C ABI/config size") != NULL);
+        assert(benchset_run(handle, protected_config, NULL, NULL) == BENCHSET_FAILED);
         benchset_free(handle);
         BenchsetSuiteHandle *suite_handle = benchset_suite_create();
         assert(suite_handle != NULL);
@@ -63,6 +68,7 @@ int main(void) {
         assert(suite.results[0].base.base.status == BENCHSET_FAILED);
         assert(suite.results[0].base.base.iterations == 0);
         assert(strstr(benchset_suite_reason(suite_handle, 0), "incompatible C ABI/config size") != NULL);
+        assert(benchset_run_all(suite_handle, protected_config, NULL, NULL) == BENCHSET_FAILED);
         benchset_suite_free(suite_handle);
     }
 #ifdef _WIN32

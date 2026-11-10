@@ -370,6 +370,8 @@ def test_suite_callback_failure_stops_notifications_and_keeps_completed_prefix(
 
     Failing in a terminal callback catches implementations that accidentally
     publish the native completed score after the host callback has failed.
+    Retry only a genuine no-work failure before the callback under test can
+    run. A callback that ran must satisfy the assertions on its first attempt.
     """
     events: List[Progress] = []
 
@@ -378,7 +380,24 @@ def test_suite_callback_failure_stops_notifications_and_keeps_completed_prefix(
         if value.benchmark == benchmark and value.phase == phase:
             raise error_type('suite callback failed')
 
-    suite = run_all(warmup_seconds=0, measurement_seconds=.1, on_progress=callback)
+    for duration in (0.1, 0.3, 0.8):
+        events.clear()
+        suite = run_all(warmup_seconds=0, measurement_seconds=duration, on_progress=callback)
+        if any((event.benchmark, event.phase) == (benchmark, phase) for event in events):
+            break
+        names = ('single_core', 'multi_core')
+        assert suite.results
+        assert tuple(result.benchmark for result in suite.results) == names[:len(suite.results)]
+        assert all(result.success for result in suite.results[:-1])
+        missed = suite.results[-1]
+        assert missed.status == 'failed', missed
+        assert missed.reason == 'measurement window was too short to complete any work', missed
+        assert missed.iterations == 0 or missed.elapsed_seconds == 0, missed
+        assert missed.score is missed.pi_equivalent is suite.aggregated_scores.pi_equivalent is None
+        assert events
+        assert (events[-1].benchmark, events[-1].phase) == (missed.benchmark, 'failed')
+    else:
+        pytest.fail('Could not reach the target callback after three measurement windows')
     assert suite.results[-1].benchmark == benchmark
     assert suite.results[-1].status == 'failed'
     assert suite.results[-1].reason == f'progress callback failed: {error_type.__name__}: suite callback failed'

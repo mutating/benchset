@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use crate::{
     run, Benchmark, BenchmarkResult, Cancellation, Options, Progress, Status,
     DEFAULT_MEASUREMENT_SECONDS, DEFAULT_WARMUP_SECONDS, PI_REFERENCE_MACHINE, PI_REFERENCE_RUN,
@@ -133,7 +135,7 @@ struct ReferenceViews {
     run: CReferenceRun,
 }
 
-// All pointers borrow immutable strings in reference_strings() for the library's
+// SAFETY: All pointers borrow immutable strings in reference_strings() for the library's
 // lifetime. The views are initialized once and exposed only through const pointers.
 unsafe impl Send for ReferenceViews {}
 unsafe impl Sync for ReferenceViews {}
@@ -168,7 +170,8 @@ pub unsafe extern "C" fn benchset_reference_machine(out: *mut CReferenceMachine,
     if out.is_null() || size as usize != std::mem::size_of::<CReferenceMachine>() {
         return 0;
     }
-    out.write(reference_views().machine);
+    let machine = reference_views().machine;
+    unsafe { out.write(machine) };
     1
 }
 
@@ -177,7 +180,8 @@ pub unsafe extern "C" fn benchset_reference_run(out: *mut CReferenceRun, size: u
     if out.is_null() || size as usize != std::mem::size_of::<CReferenceRun>() {
         return 0;
     }
-    out.write(reference_views().run);
+    let run = reference_views().run;
+    unsafe { out.write(run) };
     1
 }
 
@@ -193,10 +197,11 @@ pub unsafe extern "C" fn benchset_reference_result(
     {
         return 0;
     }
-    out.write(CReferenceBenchmarkResult {
+    let result = CReferenceBenchmarkResult {
         benchmark: reference_strings().benchmarks[index as usize].as_ptr(),
         score: PI_REFERENCE_RUN.results[index as usize].score,
-    });
+    };
+    unsafe { out.write(result) };
     1
 }
 
@@ -244,7 +249,8 @@ pub unsafe extern "C" fn benchset_copy_double(
     let Some(reader) = reader.filter(|_| !out.is_null()) else {
         return 0;
     };
-    out.write(reader(user));
+    let value = unsafe { reader(user) };
+    unsafe { out.write(value) };
     1
 }
 
@@ -253,14 +259,15 @@ pub unsafe extern "C" fn benchset_default_config(out: *mut Config) -> i32 {
     if out.is_null() {
         return 0;
     }
-    out.write(Config {
+    let config = Config {
         abi_version: ABI_VERSION,
         struct_size: std::mem::size_of::<Config>() as u32,
         benchmark: 1,
         reserved: 0,
         warmup_seconds: DEFAULT_WARMUP_SECONDS,
         measurement_seconds: DEFAULT_MEASUREMENT_SECONDS,
-    });
+    };
+    unsafe { out.write(config) };
     1
 }
 
@@ -285,25 +292,75 @@ pub unsafe extern "C" fn benchset_run(
     callback: Callback,
     user: *mut c_void,
 ) -> u32 {
-    execute(handle, config, callback, user, &mut |b, o, c, p| {
-        run(b, o, c, p)
-    })
+    let runner: &mut RustRunner<'_> = &mut |b, o, c, p| run(b, o, c, p);
+    unsafe { execute_ffi(handle, config, callback, user, runner) }
 }
 
 type RustRunner<'a> =
     dyn FnMut(Benchmark, Options, &Cancellation, &mut dyn FnMut(Progress)) -> BenchmarkResult + 'a;
 
-unsafe fn execute(
+type ConfigSnapshot = Result<Config, &'static str>;
+
+fn check_config_prefix(abi_version: u32, size: impl FnOnce() -> u32) -> Result<(), &'static str> {
+    if abi_version == ABI_VERSION && size() == std::mem::size_of::<Config>() as u32 {
+        Ok(())
+    } else {
+        Err("incompatible C ABI/config size")
+    }
+}
+
+unsafe fn read_config(config: *const Config) -> ConfigSnapshot {
+    if config.is_null() {
+        return Err("config is null");
+    }
+    // Read the ABI and size before assuming the rest of Config is readable.
+    let abi_version = unsafe { ptr::addr_of!((*config).abi_version).read() };
+    check_config_prefix(abi_version, || unsafe {
+        ptr::addr_of!((*config).struct_size).read()
+    })?;
+    Ok(unsafe { config.read() })
+}
+
+fn c_progress(progress: Progress) -> CProgress {
+    CProgress {
+        phase: progress.phase as u32,
+        workers: progress.workers,
+        fraction: progress.fraction,
+        phase_elapsed_seconds: progress.phase_elapsed_seconds,
+        phase_duration_seconds: progress.phase_duration_seconds,
+        iterations: progress.iterations,
+    }
+}
+
+unsafe fn execute_ffi(
     handle: *mut Handle,
     config: *const Config,
     callback: Callback,
     user: *mut c_void,
     runner: &mut RustRunner<'_>,
 ) -> u32 {
-    if handle.is_null() {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
         return Status::Failed as u32;
-    }
-    let handle = &*handle;
+    };
+    execute(
+        handle,
+        &mut || unsafe { read_config(config) },
+        &mut |progress| {
+            if let Some(callback) = callback {
+                let progress = c_progress(progress);
+                unsafe { callback(&progress, user) };
+            }
+        },
+        runner,
+    )
+}
+
+fn execute(
+    handle: &Handle,
+    snapshot: &mut dyn FnMut() -> ConfigSnapshot,
+    notify: &mut dyn FnMut(Progress),
+    runner: &mut RustRunner<'_>,
+) -> u32 {
     if handle.used.swap(true, Ordering::AcqRel) {
         return Status::Failed as u32;
     }
@@ -311,20 +368,10 @@ unsafe fn execute(
     let mut options = Options::default();
     let mut requested = None;
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        if config.is_null() {
-            return BenchmarkResult::failed(benchmark, options, "config is null".into());
-        }
-        // Read the fixed prefix before reading the remainder of the structure.
-        if ptr::addr_of!((*config).abi_version).read() != ABI_VERSION
-            || ptr::addr_of!((*config).struct_size).read() != std::mem::size_of::<Config>() as u32
-        {
-            return BenchmarkResult::failed(
-                benchmark,
-                options,
-                "incompatible C ABI/config size".into(),
-            );
-        }
-        let config = config.read();
+        let config = match snapshot() {
+            Ok(config) => config,
+            Err(reason) => return BenchmarkResult::failed(benchmark, options, reason.into()),
+        };
         requested = Some((config.warmup_seconds, config.measurement_seconds));
         benchmark = match Benchmark::from_id(config.benchmark) {
             Some(value) => value,
@@ -358,24 +405,7 @@ unsafe fn execute(
                 )
             }
         };
-        runner(
-            benchmark,
-            options,
-            &handle.cancellation,
-            &mut |progress: Progress| {
-                if let Some(callback) = callback {
-                    let progress = CProgress {
-                        phase: progress.phase as u32,
-                        workers: progress.workers,
-                        fraction: progress.fraction,
-                        phase_elapsed_seconds: progress.phase_elapsed_seconds,
-                        phase_duration_seconds: progress.phase_duration_seconds,
-                        iterations: progress.iterations,
-                    };
-                    callback(&progress, user);
-                }
-            },
-        )
+        runner(benchmark, options, &handle.cancellation, notify)
     }));
     let mut result = outcome.unwrap_or_else(|_| {
         BenchmarkResult::failed(benchmark, options, "native benchmark panicked".into())
@@ -392,7 +422,7 @@ unsafe fn execute(
 
 #[no_mangle]
 pub unsafe extern "C" fn benchset_cancel(handle: *mut Handle) {
-    if let Some(handle) = handle.as_ref() {
+    if let Some(handle) = unsafe { handle.as_ref() } {
         handle.cancellation.cancel();
     }
 }
@@ -402,12 +432,13 @@ pub unsafe extern "C" fn benchset_result(handle: *const Handle, out: *mut CResul
     if handle.is_null() || out.is_null() {
         return 0;
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     let result = match &*stored {
-        Some(stored) => &stored.result,
+        Some(stored) => legacy_result(&stored.result),
         None => return 0,
     };
-    out.write(legacy_result(result));
+    unsafe { out.write(result) };
     1
 }
 
@@ -439,12 +470,13 @@ pub unsafe extern "C" fn benchset_result_v2(
     if handle.is_null() || out.is_null() || size as usize != std::mem::size_of::<CResultV2>() {
         return 0;
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     let result = match &*stored {
-        Some(stored) => &stored.result,
+        Some(stored) => extended_result(&stored.result),
         None => return 0,
     };
-    out.write(extended_result(result));
+    unsafe { out.write(result) };
     1
 }
 
@@ -465,12 +497,13 @@ pub unsafe extern "C" fn benchset_result_v3(
     if handle.is_null() || out.is_null() || size as usize != std::mem::size_of::<CResultV3>() {
         return 0;
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     let result = match &*stored {
-        Some(stored) => &stored.result,
+        Some(stored) => linked_result(&stored.result),
         None => return 0,
     };
-    out.write(linked_result(result));
+    unsafe { out.write(result) };
     1
 }
 
@@ -492,19 +525,21 @@ pub unsafe extern "C" fn benchset_sample(
     if handle.is_null() || out.is_null() {
         return 0;
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     let Some(sample) = stored
         .as_ref()
         .and_then(|stored| stored.result.samples.get(index as usize))
     else {
         return 0;
     };
-    out.write(CSample {
+    let value = CSample {
         elapsed_seconds: sample.elapsed_seconds,
         duration_seconds: sample.duration_seconds,
         iterations: sample.iterations,
         iterations_per_second: sample.iterations_per_second,
-    });
+    };
+    unsafe { out.write(value) };
     1
 }
 
@@ -513,7 +548,8 @@ pub unsafe extern "C" fn benchset_reason(handle: *const Handle) -> *const c_char
     if handle.is_null() {
         return ptr::null();
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     match &*stored {
         Some(stored) => stored.reason.as_ptr(),
         None => ptr::null(),
@@ -523,14 +559,17 @@ pub unsafe extern "C" fn benchset_reason(handle: *const Handle) -> *const c_char
 #[no_mangle]
 pub unsafe extern "C" fn benchset_free(handle: *mut Handle) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle));
+        let handle = unsafe { Box::from_raw(handle) };
+        drop(handle);
     }
 }
 
 #[cfg(test)]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[path = "ffi_tests.rs"]
 mod tests;
 
 #[cfg(test)]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[path = "ffi_reference_tests.rs"]
 mod reference_tests;

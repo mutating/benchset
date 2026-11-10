@@ -58,7 +58,8 @@ def test_developer_build_copies_the_fresh_host_library_after_successful_cargo(
         metadata = output / 'reported-build-script-output/metadata.json'
         metadata.parent.mkdir(parents=True, exist_ok=True)
         metadata.write_text('{"fresh": true}\n')
-        message = {'reason': 'build-script-executed', 'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(metadata).hex()]]}
+        message = {'reason': 'build-script-executed', 'out_dir': str(metadata.parent),
+                   'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(metadata).hex()]]}
         return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(message) + '\n')
 
     monkeypatch.setattr(subprocess, 'run', compile_)

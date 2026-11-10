@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "benchset"
-version = "0.0.8"
+version = "0.0.9"
 authors = [
   { name="Evgeniy Blinov", email="zheni-b@yandex.ru" },
 ]
@@ -48,7 +48,7 @@ keywords = [
 benchset = "benchset.cli:main"
 
 [[tool.mypy.overrides]]
-module = ["benchset._native", "benchset._aggregate", "benchset.cli"]
+module = ["benchset._native", "benchset._signal_state", "benchset._aggregate", "benchset.cli"]
 disallow_any_expr = false
 disallow_any_explicit = false
 disallow_any_unimported = false

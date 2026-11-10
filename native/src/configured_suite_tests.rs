@@ -131,7 +131,7 @@ fn configured_windows_reach_each_child_without_mutating_the_original() {
         let config = config();
         let mut runs = Vec::new();
         assert_eq!(
-            execute_suite(
+            execute_suite_ffi(
                 suite.0,
                 &config,
                 None,
@@ -182,7 +182,7 @@ fn configuration_abort_preserves_empty_or_completed_prefix() {
             let mut events = Events::new(suite.0);
             events.abort_at = abort_at;
             assert_eq!(
-                execute_suite(
+                execute_suite_ffi(
                     suite.0,
                     &config(),
                     None,
@@ -229,7 +229,7 @@ fn invalid_reconfigured_windows_publish_failure_and_stop() {
             events.invalid_at = invalid_at;
             let mut runs = 0;
             assert_eq!(
-                execute_suite(
+                execute_suite_ffi(
                     suite.0,
                     &config(),
                     None,
@@ -262,7 +262,7 @@ fn observer_stop_and_cancellation_retain_their_existing_semantics() {
             let mut events = Events::new(suite.0);
             events.stop = stop;
             events.cancel_after = 1;
-            let status = execute_suite(
+            let status = execute_suite_ffi(
                 suite.0,
                 &config(),
                 None,
@@ -346,5 +346,81 @@ fn public_entrypoint_forwards_configuration_and_observation() {
         );
         assert_eq!(events.calls, [('c', 1), ('r', 1)]);
         assert_eq!(events.results, [(1, Status::Cancelled as u32, 0.25, 0.5)]);
+    }
+}
+
+/// An observer may update the caller's config through its context between
+/// children. The next child must read that update, not reuse an earlier snapshot.
+#[test]
+fn suite_reads_config_again_after_observation() {
+    unsafe extern "C" fn update(benchmark: u32, _: *const Handle, user: *mut c_void) -> u32 {
+        if benchmark == Benchmark::SingleCore as u32 {
+            (*user.cast::<Config>()).measurement_seconds = 0.75;
+        }
+        0
+    }
+
+    let suite = Suite(benchset_suite_create());
+    let mut config = config();
+    let config = ptr::addr_of_mut!(config);
+    let mut windows = Vec::new();
+    let status = unsafe {
+        execute_suite_ffi(
+            suite.0,
+            config,
+            None,
+            Some(update),
+            None,
+            config.cast(),
+            &mut |b, o, c, _| {
+                windows.push(o.measurement.as_secs_f64());
+                completed(b, o, c)
+            },
+        )
+    };
+    assert_eq!(status, Status::Completed as u32);
+    assert_eq!(windows, [20.0, 0.75]);
+}
+
+/// A successful configuration callback can still invalidate either header
+/// field. Reject its copy before interpreting any duration or running a child.
+#[test]
+fn configured_suite_revalidates_the_copied_header() {
+    unsafe extern "C" fn invalidate(_: u32, config: *mut Config, user: *mut c_void) -> u32 {
+        if *user.cast::<bool>() {
+            (*config).abi_version += 1;
+        } else {
+            (*config).struct_size -= 1;
+        }
+        1
+    }
+
+    for mut change_abi in [true, false] {
+        let suite = Suite(benchset_suite_create());
+        unsafe {
+            benchset_suite_cancel(suite.0);
+            assert_eq!(
+                benchset_run_all_configured(
+                    suite.0,
+                    &config(),
+                    None,
+                    None,
+                    Some(invalidate),
+                    ptr::addr_of_mut!(change_abi).cast()
+                ),
+                Status::Failed as u32
+            );
+            let result = summary(suite.0);
+            assert_eq!(result.result_count, 1);
+            assert_eq!((*result.results).base.base.status, Status::Failed as u32);
+            assert_eq!(
+                (*result.results).base.base.measurement_seconds,
+                DEFAULT_MEASUREMENT_SECONDS
+            );
+            assert_eq!(
+                std::ffi::CStr::from_ptr(benchset_suite_reason(suite.0, 0)).to_bytes(),
+                b"incompatible C ABI/config size"
+            );
+        }
     }
 }

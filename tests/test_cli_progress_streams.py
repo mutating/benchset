@@ -60,6 +60,7 @@ def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentatio
     must receive neither progress frames nor an earlier child's erase sequence.
     Inspect policy at the first callback, regardless of its phase: zero warmup
     or a descheduled coordinator can legitimately start with measurement.
+    Leave enough measurement time for a delayed worker to reach both children.
     """
     initial = _Output(initial_terminal)
     destination = _Output(not initial_terminal) if replace_stream else initial
@@ -87,7 +88,7 @@ def test_cli_uses_the_next_childs_current_output_stream_for_terminal_presentatio
     monkeypatch.setattr(cli.sys, 'stderr', errors)
     monkeypatch.setattr(cli.shutil, 'get_terminal_size', lambda *_args, **_kwargs: os.terminal_size((120, 24)))
     monkeypatch.setattr(cli._Progress, '__call__', observe)
-    assert cli.main([f'--warmup={warmup}', '--duration=.2']) == 0, errors.getvalue()
+    assert cli.main([f'--warmup={warmup}', '--duration=.5']) == 0, errors.getvalue()
     assert selected
     assert not errors.getvalue()
     value, terminal, current_stream, width = first_callback[0]

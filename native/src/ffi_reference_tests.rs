@@ -521,7 +521,7 @@ fn legacy_getter_canary_and_extended_mapping_preserve_all_fields() {
         }) {
             let h = Owned::new();
             assert_eq!(
-                execute(
+                execute_ffi(
                     h.0,
                     &config(),
                     None,
@@ -817,7 +817,7 @@ fn extended_getter_recovers_poisoned_result_mutex() {
         }));
         assert!(poisoned.is_err());
         assert_eq!(
-            execute(h.0, &config(), None, ptr::null_mut(), &mut |_, _, _, _| {
+            execute_ffi(h.0, &config(), None, ptr::null_mut(), &mut |_, _, _, _| {
                 panic!("native runner failed")
             }),
             Status::Failed as u32

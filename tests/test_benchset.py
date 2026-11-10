@@ -55,16 +55,38 @@ def test_measurement_and_samples() -> None:
 
 
 def test_all_benchmarks() -> None:
-    results = run_all(warmup_seconds=0, measurement_seconds=0.08).results
-    assert [result.benchmark for result in results] == ['single_core', 'multi_core']
-    assert all(result.success for result in results)
+    """Verify both native suite results and their Pi scores in order.
+
+    Retry only a well-formed terminal no-work result when a worker misses its
+    measurement window. Keep every window below the one-second sample interval
+    so the single-core result still has no variation statistic.
+    """
+    names = ('single_core', 'multi_core')
     references = {value.benchmark: value.score for value in PI_REFERENCE_RUN.results}
-    for result in results:
-        assert_result_references(result)
-        assert result.score is not None
-        assert result.pi_equivalent == result.score / references[result.benchmark]
-    assert results[1].workers >= 1
-    assert results[0].variation_percent is None
+    for duration in (0.08, 0.3, 0.8):
+        results = run_all(warmup_seconds=0, measurement_seconds=duration).results
+        assert results
+        assert tuple(result.benchmark for result in results) == names[:len(results)]
+        for index, result in enumerate(results):
+            assert_result_references(result)
+            if index == 0:
+                assert result.variation_percent is None
+            else:
+                assert result.workers >= 1
+            if not result.success:
+                assert index == len(results) - 1, results
+                assert result.status == 'failed', result
+                assert result.reason == 'measurement window was too short to complete any work', result
+                assert result.iterations == 0 or result.elapsed_seconds == 0, result
+                assert result.score is None
+                assert result.pi_equivalent is None
+                break
+            assert result.score is not None
+            assert result.pi_equivalent == result.score / references[result.benchmark]
+        else:
+            assert len(results) == len(names), results
+            return
+    pytest.fail(f'No complete suite after three measurement windows: {results!r}')
 
 
 @pytest.mark.parametrize('phase', ['warmup', 'measurement'])

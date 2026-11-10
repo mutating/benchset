@@ -16,7 +16,8 @@ pub unsafe extern "C" fn benchset_benchmark_id(name: *const u8, size: u64) -> u3
     if name.is_null() || size > isize::MAX as u64 {
         return 0;
     }
-    std::str::from_utf8(std::slice::from_raw_parts(name, size as usize))
+    let name = unsafe { std::slice::from_raw_parts(name, size as usize) };
+    std::str::from_utf8(name)
         .ok()
         .and_then(Benchmark::from_name)
         .map_or(0, |benchmark| benchmark as u32)
@@ -37,7 +38,7 @@ pub unsafe extern "C" fn benchset_benchmark_match(
             return benchmark as u32;
         }
         let name = benchmark.name().as_bytes();
-        match matcher(name.as_ptr(), name.len() as u64, user) {
+        match unsafe { matcher(name.as_ptr(), name.len() as u64, user) } {
             value if value > 0 => return benchmark as u32,
             0 => {}
             _ => return 0,
@@ -75,5 +76,6 @@ pub extern "C" fn benchset_validation_message(error: u32, cli: u32) -> *const c_
 }
 
 #[cfg(test)]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[path = "config_ffi_tests.rs"]
 mod tests;
