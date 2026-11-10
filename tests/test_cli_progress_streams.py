@@ -3,11 +3,11 @@
 import io
 import os
 from threading import enumerate as threads
-from typing import Callable, List, Optional, Tuple, Type
+from typing import Callable, List, Optional, TextIO, Tuple, Type
 
 import pytest
 
-from benchset import BenchmarkRunner, Progress, cli
+from benchset import BenchmarkResult, BenchmarkRunner, Progress, cli
 from benchset._native import Native
 from tests.helpers import assert_runner_reusable
 
@@ -164,21 +164,26 @@ def test_native_child_keeps_reporting_a_disconnect_after_isatty_changes(monkeypa
 
 
 @pytest.mark.parametrize('error_type', [ValueError, OSError, KeyboardInterrupt])
-def test_next_child_terminal_inspection_failure_releases_native_state(
+def test_next_child_terminal_inspection_failure_releases_native_state(  # noqa: PLR0915 — Keep real retries, the boundary error and native cleanup in one lifetime.
     monkeypatch: pytest.MonkeyPatch, error_type: Type[BaseException],
 ) -> None:
     """A failing next-child isatty inspection must unblock and free the shared suite.
 
-    HEAD had already freed the first child before inspecting the next output.
-    The shared Rust observer is still waiting for acknowledgement at this point;
+    The shared Rust observer waits for acknowledgement while output policy is
+    inspected for the next child. Unblock it and release the native state;
     preserve ValueError identity and the existing I/O/interrupt exit codes while
-    leaving no native handle or CLI worker behind.
+    leaving no native handle or CLI worker behind. Retry only a well-formed
+    first-child no-work result before that inspection; each retry must release
+    its native state. The successful attempt must reach the failing check once.
     """
     original = error_type('next output cannot report its terminal status')
 
     class Output(_Output):
+        failure_checks = 0
+
         def isatty(self) -> bool:
             if self.first_result:
+                self.failure_checks += 1
                 raise original
             return False
 
@@ -186,6 +191,12 @@ def test_next_child_terminal_inspection_failure_releases_native_state(
     create, free = Native.create, Native.free
     present = cli._Progress.__call__
     benchmarks: List[str] = []
+    results: List[BenchmarkResult] = []
+    render = cli.render
+
+    def record_result(result: BenchmarkResult, stream: TextIO) -> None:
+        results.append(result)
+        render(result, stream)
 
     def record_progress(self: cli._Progress, value: Progress) -> None:
         benchmarks.append(value.benchmark)
@@ -203,16 +214,44 @@ def test_next_child_terminal_inspection_failure_releases_native_state(
     monkeypatch.setattr(Native, 'create', track_create)
     monkeypatch.setattr(Native, 'free', track_free)
     monkeypatch.setattr(cli._Progress, '__call__', record_progress)
-    monkeypatch.setattr(cli.sys, 'stdout', Output(False))
-    monkeypatch.setattr(cli.sys, 'stderr', io.StringIO())
-    if error_type is ValueError:
-        with pytest.raises(ValueError, match='next output cannot report') as caught:
-            cli.main(['--warmup=.1', '--duration=.1'])
-        assert caught.value is original
+    monkeypatch.setattr(cli, 'render', record_result)
+    for duration in (0.1, 0.3, 0.8):
+        output, errors = Output(False), io.StringIO()
+        results.clear()
+        monkeypatch.setattr(cli.sys, 'stdout', output)
+        monkeypatch.setattr(cli.sys, 'stderr', errors)
+        caught: Optional[ValueError] = None
+        try:
+            status: Optional[int] = cli.main(['--warmup=.1', f'--duration={duration}'])
+        except ValueError as error:
+            caught, status = error, None
+        assert not handles
+        assert 'multi_core' not in benchmarks
+        assert not any(thread.name == 'benchset-cli' for thread in threads())
+        if output.failure_checks:
+            assert output.failure_checks == 1
+            if error_type is ValueError:
+                assert caught is original
+            else:
+                assert caught is None
+                assert status == (1 if error_type is OSError else 130)
+                if error_type is OSError:
+                    assert str(original) in errors.getvalue()
+            break
+        assert caught is None
+        assert status == 1
+        assert len(results) == 1
+        result = results[0]
+        assert result.benchmark == 'single_core'
+        assert result.status == 'failed'
+        assert result.reason == 'measurement window was too short to complete any work'
+        assert result.iterations == 0 or result.elapsed_seconds == 0
+        assert result.score is None
+        assert result.pi_equivalent is None
+        assert result.workers == 1
+        assert result.warmup_seconds == 0.1
+        assert result.measurement_seconds == duration
     else:
-        assert cli.main(['--warmup=.1', '--duration=.1']) == (1 if error_type is OSError else 130)
-    assert not handles
-    assert 'multi_core' not in benchmarks
-    assert not any(thread.name == 'benchset-cli' for thread in threads())
+        pytest.fail(f'No next-child terminal inspection after three measurement windows: {results!r}')
     assert_runner_reusable(BenchmarkRunner())
     assert not handles
