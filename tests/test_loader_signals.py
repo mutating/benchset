@@ -18,6 +18,8 @@ from typing import Any, List, Optional, Type, cast
 import pytest
 
 from benchset import _native, _signal_state
+from tests import helpers
+from tests.helpers import frame_code_audit_supported
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -1113,9 +1115,70 @@ def test_native_lookup_error_origin_is_checked_without_requiring_posix(
         signal.signal(signal.SIGINT, previous)
 
 
-@pytest.mark.skipif(sys.implementation.name != 'cpython', reason='f_code access auditing is CPython-specific')
+@pytest.mark.parametrize('supported', [False, True])
+def test_frame_code_audit_capability_probes_and_caches_the_interpreter(
+    monkeypatch: pytest.MonkeyPatch, supported: bool,
+) -> None:
+    """An independent child reports actual event support once, including hosts with no event."""
+    calls: List[object] = []
+
+    def probe(arguments: List[str], **options: object) -> "subprocess.CompletedProcess[str]":
+        assert arguments[:3] == [sys.executable, '-I', '-c']
+        assert 'frame.f_code' in arguments[3]
+        assert 'benchset' not in arguments[3]
+        assert options == {'capture_output': True, 'text': True, 'check': True, 'timeout': 10}
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, stdout=str(int(supported)) + '\n', stderr='')
+
+    monkeypatch.setattr(helpers, 'subprocess', SimpleNamespace(run=probe))
+    helpers.frame_code_audit_supported.cache_clear()
+    try:
+        assert helpers.frame_code_audit_supported() is supported
+        assert helpers.frame_code_audit_supported() is supported
+        assert len(calls) == 1
+    finally:
+        helpers.frame_code_audit_supported.cache_clear()
+
+
+@pytest.mark.parametrize('include_audit', [False, True])
+def test_callback_origin_tolerates_a_portable_frame_inspection_veto(include_audit: bool) -> None:
+    """A denied frame lookup keeps origin detection optional even without interpreter audit events."""
+    class DeniedFrame:
+        @property
+        def f_code(self) -> object:
+            raise PermissionError('host refuses frame inspection')
+
+    trace = SimpleNamespace(tb_next=SimpleNamespace(tb_frame=DeniedFrame()))
+    assert not _signal_state._from_callback(cast(Any, trace), include_audit=include_audit)
+
+
+def test_direct_error_tolerates_a_portable_code_inspection_veto() -> None:
+    """Code-introspection refusal preserves a direct registration error on every runtime.
+
+    A real traceback reaches the callable's raising frame; its code property
+    supplies the same PermissionError fallback without requiring OS audit support.
+    """
+    failure = ValueError('registration refused')
+
+    class Operation:
+        def __call__(self) -> None:
+            raise failure
+
+        @property
+        def __code__(self) -> object:
+            raise PermissionError('host refuses callable code inspection')
+
+    operation = Operation()
+    with pytest.raises(ValueError, match='registration refused') as caught:
+        operation()
+    assert caught.value is failure
+    assert _signal_state._direct_error(caught.value, operation)
+
+
 def test_callback_origin_tolerates_a_real_frame_inspection_veto() -> None:
     """An audit refusal of actual frame inspection leaves optional origin detection unavailable."""
+    if not frame_code_audit_supported():
+        pytest.skip('This interpreter does not audit frame.f_code access')
     source = '''
 import sys
 from benchset import _signal_state

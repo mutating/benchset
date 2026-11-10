@@ -16,6 +16,7 @@ from typing import Any, List, Tuple, Type
 import pytest
 
 from benchset import _signal_state
+from tests.helpers import frame_code_audit_supported
 
 
 def _restore_after_interruption(
@@ -280,6 +281,8 @@ def test_retained_inspection_error_does_not_retain_the_snapshot_error() -> None:
     classifier must not leave its input error in that retained frame.
     Factories keep the raised errors out of their own raising frames.
     """
+    if not frame_code_audit_supported():
+        pytest.skip('This interpreter does not audit frame.f_code access')
     source = '''import ctypes, gc, sys, weakref
 from benchset import _signal_state
 references, retained = [], []
