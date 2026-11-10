@@ -299,6 +299,44 @@ def test_loading_failure_restores_the_original_signal_policy(
         cached.cache_clear()
 
 
+@pytest.mark.parametrize('replacement', [signal.SIG_IGN, signal.SIG_DFL])
+def test_snapshot_lookup_preserves_a_new_noncallable_policy(
+    monkeypatch: pytest.MonkeyPatch, replacement: signal.Handlers,
+) -> None:
+    """A host policy selected during snapshot lookup bypasses temporary signal ownership.
+
+    Model the audit hook's choice without installing process-wide handlers so
+    both ignore and default policies are checked on every platform.
+    """
+    selected: object = signal.default_int_handler
+    events: List[str] = []
+    result = object()
+
+    def current(_signum: int) -> object:
+        return selected
+
+    def resolve() -> None:
+        nonlocal selected
+        events.append('lookup')
+        selected = replacement
+
+    def install(*_arguments: object) -> None:
+        pytest.fail('the new noncallable policy must not be temporarily replaced')
+
+    def load(path: str) -> object:
+        events.append(path)
+        return result
+
+    monkeypatch.setattr(_native, 'signal', SimpleNamespace(SIGINT=signal.SIGINT, getsignal=current))
+    monkeypatch.setattr(_native, '_get_signal', current)
+    monkeypatch.setattr(_native, '_native_sigaction', resolve)
+    monkeypatch.setattr(_native, '_set_signal', install)
+    monkeypatch.setattr(_native, '_shared_library', load)
+    assert _native._load_library('policy-selected-during-lookup') is result
+    assert events == ['lookup', 'policy-selected-during-lookup']
+    assert selected is replacement
+
+
 @pytest.mark.parametrize('message', [
     'signal only works in main thread',
     'signal only works in main thread of the main interpreter',
@@ -1001,6 +1039,40 @@ def test_optional_native_snapshot_initialization(  # noqa: PLR0915 — Keep the 
             assert events == (['sigaction'] if mode == 'denied' else [])
     finally:
         signal.signal(signal.SIGINT, previous)
+        _signal_state._sigaction.cache_clear()
+
+
+def test_snapshot_lookup_propagates_a_recognizable_callback_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signal-shaped caller PermissionError must escape optional native lookup on every OS.
+
+    Supply the real handler argument pair through a fake process symbol table.
+    This exercises lookup's callback classification without requiring sigaction
+    or delivering an OS signal, including on Windows.
+    """
+    failure = PermissionError('caller interrupted snapshot lookup')
+    requests: List[str] = []
+
+    def interrupt(_signum: int, _frame: FrameType) -> None:
+        raise failure
+
+    class Process:
+        def __getitem__(self, name: str) -> object:
+            requests.append(name)
+            interrupt(int(signal.SIGINT), sys._getframe())
+            pytest.fail('the caller interruption must escape the symbol table')
+
+    monkeypatch.setattr(_signal_state, 'sys', SimpleNamespace(platform='linux'))
+    monkeypatch.setattr(ctypes, 'pythonapi', Process(), raising=False)
+    _signal_state._sigaction.cache_clear()
+    try:
+        with pytest.raises(PermissionError, match='caller interrupted snapshot lookup') as caught:
+            _signal_state._native_sigaction()
+        assert caught.value is failure
+        assert requests == ['sigaction']
+        assert _signal_state._sigaction.cache_info().currsize == 0
+    finally:
         _signal_state._sigaction.cache_clear()
 
 

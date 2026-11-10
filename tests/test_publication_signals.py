@@ -33,7 +33,8 @@ def _instrument_stat(monkeypatch: pytest.MonkeyPatch, read: Callable[..., os.sta
     accessor = getattr(Path(), '_accessor', None)
     if accessor is not None:
         monkeypatch.setattr(accessor, 'stat', read)
-        monkeypatch.setattr(accessor, 'lstat', lstat)
+        if hasattr(accessor, 'lstat'):
+            monkeypatch.setattr(accessor, 'lstat', lstat)
 
 
 @pytest.fixture(params=['nested', 'callable', 'mock', 'dispatcher'])
@@ -1243,7 +1244,12 @@ else:
 def test_stat_absence_policy_matches_the_interpreters_path_exists(
     monkeypatch: pytest.MonkeyPatch, error_number: int, winerror: int | None, instrumentation: str,
 ) -> None:
-    """Preserve pathlib's OS-error policy across versions and transparent tracing wrappers."""
+    """Preserve pathlib's OS-error policy across versions and transparent tracing wrappers.
+
+    Python 3.14 suppresses every OS stat error. Assert that rule directly:
+    the Windows C existence fast path can reject this synthetic path during input
+    conversion, before stat, so it cannot serve as the OS-error oracle.
+    """
     failure = OSError(error_number, 'OS stat refusal')
     if winerror is not None:
         failure.winerror = winerror  # type: ignore[attr-defined]  # Exercise Windows errors on every host.
@@ -1263,6 +1269,9 @@ def test_stat_absence_policy_matches_the_interpreters_path_exists(
             raise failure
 
     probe = Probe()
+    if sys.version_info >= (3, 14):
+        assert cargo._stat_if_present(probe.stat) is None
+        return
     try:
         expected = Path.exists(probe)  # type: ignore[arg-type]  # Use the real pathlib policy with a controlled stat.
     except OSError:
