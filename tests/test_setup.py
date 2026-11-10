@@ -18,7 +18,7 @@ from setuptools.command.develop import develop  # type: ignore[import-untyped]
 from wheel.bdist_wheel import bdist_wheel  # type: ignore[import-untyped]
 from wheel.wheelfile import WheelFile  # type: ignore[import-untyped]
 
-from scripts import version
+from scripts import cargo, version
 
 
 @pytest.fixture
@@ -40,6 +40,8 @@ def setup_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, A
     namespace['distribution'] = distributions[0]
     globals_ = namespace['BuildNative'].run.__globals__
     monkeypatch.setitem(globals_, 'ROOT', tmp_path)
+    # Target-platform simulations must retain the real host's signal support.
+    monkeypatch.setattr(cargo._signal_support(), 'sys', SimpleNamespace(platform=namespace['sys'].platform))
     return namespace
 
 

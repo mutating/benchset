@@ -9,11 +9,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from scripts import version
+from scripts import cargo, version
 
 
 @pytest.mark.parametrize('configuration', [
@@ -46,6 +47,8 @@ def test_developer_build_copies_the_fresh_host_library_after_successful_cargo(
     output = tmp_path / (cargo_output or 'target')
     synchronized = []
     monkeypatch.setattr(version, 'sync_version', lambda root: synchronized.append(root))
+    # The requested target must not redirect the real host's native signal lookup.
+    monkeypatch.setattr(cargo._signal_support(), 'sys', SimpleNamespace(platform=sys.platform))
     monkeypatch.setattr(sys, 'platform', system)
 
     def compile_(arguments: list[str], **options: Any) -> subprocess.CompletedProcess[str]:

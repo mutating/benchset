@@ -125,6 +125,7 @@ def _load_library(path: str) -> _CDLL:
                 handler = previous
         except ValueError as error:
             if (not _direct_error(error, _set_signal) or _get_signal(signal.SIGINT) is defer or error.args not in (
+                ('signal only works in main thread',),
                 ('signal only works in main thread of the main interpreter',),
                 ('signal only works in main thread or with __pypy__.thread.enable_signals()',),
             )):

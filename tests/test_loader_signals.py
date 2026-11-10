@@ -300,6 +300,7 @@ def test_loading_failure_restores_the_original_signal_policy(
 
 
 @pytest.mark.parametrize('message', [
+    'signal only works in main thread',
     'signal only works in main thread of the main interpreter',
     'signal only works in main thread or with __pypy__.thread.enable_signals()',
 ])
@@ -327,8 +328,10 @@ def test_subinterpreter_loading_does_not_require_signal_registration(
 def test_subinterpreter_signal_refusal_survives_an_introspection_denial(context: str) -> None:
     """Forbidden traceback inspection must not turn a normal signal refusal into a loader failure.
 
-    Exercise a real subinterpreter when available and a synthetic setter on
-    every platform so coverage does not depend on experimental interpreter APIs.
+    Exercise a shared-GIL subinterpreter that permits ctypes when available,
+    and a synthetic setter on every platform so coverage does not depend on
+    experimental interpreter APIs. Test Native directly because public runs
+    can independently require signal registration on older interpreters.
     """
     if context == 'subinterpreter' and find_spec('_xxsubinterpreters') is None:
         pytest.skip('The experimental CPython subinterpreter harness is unavailable')
@@ -341,11 +344,11 @@ expected = object()
 _native._shared_library = lambda _path: expected
 '''
     check = ("assert _native._load_library('restricted-interpreter') is expected" if context == 'simulated' else
-             "assert run('single_core', warmup_seconds=-1).reason == 'warmup_seconds must be finite and nonnegative'")
+             "assert _native.Native().lib.benchset_abi_version() == _native.ABI_VERSION")
     inner = f'''
 import sys
 sys.path.insert(0, {str(_ROOT)!r})
-from benchset import run
+from benchset import _native
 {setup if context == 'simulated' else ''}
 def audit(event, args):
     if event == 'object.__getattr__' and args[1] == 'f_code':
@@ -358,7 +361,10 @@ sys.addaudithook(audit)
     if context == 'subinterpreter':
         source = f'''
 import _xxsubinterpreters as interpreters
-interpreter = interpreters.create()
+try:
+    interpreter = interpreters.create(isolated=False)
+except TypeError:
+    interpreter = interpreters.create()
 try:
     interpreters.run_string(interpreter, {inner!r})
 finally:

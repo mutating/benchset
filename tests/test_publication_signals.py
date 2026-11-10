@@ -11,11 +11,11 @@ import signal
 import subprocess
 import sys
 import weakref
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from threading import Thread
 from types import FrameType, SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from filelock import FileLock, Timeout
@@ -23,6 +23,17 @@ from filelock import FileLock, Timeout
 from scripts import cargo
 
 _OWNERS: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
+
+
+def _instrument_stat(monkeypatch: pytest.MonkeyPatch, read: Callable[..., os.stat_result]) -> None:
+    """Instrument both OS entry points and the cached functions in older pathlib versions."""
+    lstat = partial(read, follow_symlinks=False)
+    monkeypatch.setattr(os, 'stat', read)
+    monkeypatch.setattr(os, 'lstat', lstat)
+    accessor = getattr(Path(), '_accessor', None)
+    if accessor is not None:
+        monkeypatch.setattr(accessor, 'stat', read)
+        monkeypatch.setattr(accessor, 'lstat', lstat)
 
 
 @pytest.fixture(params=['nested', 'callable', 'mock', 'dispatcher'])
@@ -51,9 +62,10 @@ def _stat_proxy(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest)
     def dispatched(*args: Any, **kwargs: Any) -> os.stat_result:
         return dispatch('stat', args, kwargs)
 
-    monkeypatch.setattr(os, 'stat', {
+    proxies: dict[str, Callable[..., os.stat_result]] = {
         'nested': outer, 'callable': Proxy(), 'mock': Mock(wraps=original), 'dispatcher': dispatched,
-    }[request.param])
+    }
+    _instrument_stat(monkeypatch, proxies[request.param])
 
 
 @pytest.fixture(autouse=True)
@@ -1269,7 +1281,11 @@ def test_stat_absence_policy_matches_the_interpreters_path_exists(
 def test_transparent_stat_instrumentation_keeps_publication_and_caller_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool,
 ) -> None:
-    """A tracing wrapper is part of the OS operation, while a signal raised inside it remains caller-owned."""
+    """A tracing wrapper is part of the OS operation, while its caller signal must propagate.
+
+    Deliver once so a later lock check cannot hide an interruption swallowed
+    by the first stat operation.
+    """
     package, image = _products(tmp_path)
     original = os.stat
     calls: list[object] = []
@@ -1280,11 +1296,11 @@ def test_transparent_stat_instrumentation_keeps_publication_and_caller_errors(
 
     def traced_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
         calls.append(path)
-        if interrupted and isinstance(path, Path) and path.name == '.benchset.publish.lock':
+        if interrupted and isinstance(path, Path) and path.name == '.benchset.publish.lock' and calls.count(path) == 1:
             signal.raise_signal(signal.SIGUSR1)
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, 'stat', traced_stat)
+    _instrument_stat(monkeypatch, traced_stat)
     previous = signal.signal(signal.SIGUSR1, interrupt)
     try:
         if interrupted:
