@@ -34,7 +34,7 @@ from tests.helpers import mock_suite
     ('process', 'render'), ('process', 'flush'), ('process', 'separator'), ('process', 'pending'),
     ('eligible-worker', 'render'), ('eligible-worker', 'flush'), ('eligible-worker', 'separator'),
 ])
-def test_sigint_interrupts_blocked_intermediate_output(operation: str, delivery: str) -> None:
+def test_sigint_interrupts_blocked_intermediate_output(operation: str, delivery: str) -> None:  # noqa: PLR0915 — One pipe, delivery handshake and cancellation lifetime.
     """Ctrl+C interrupts every intermediate output operation before native is acknowledged.
 
     Fill a real pipe and keep its reader open without draining it. A proxy routes
@@ -46,6 +46,12 @@ def test_sigint_interrupts_blocked_intermediate_output(operation: str, delivery:
     main thread to enter write before delivery. It observes eligibility both
     before publication and while waiting, detecting a late block or early
     restore without depending on the kernel choosing a particular thread.
+    Start the five-second cancellation bound after the helper confirms actual
+    signal delivery; its startup rendezvous can itself be scheduled late. The
+    helper stays non-daemon until that acknowledgement is written, so a fast
+    cancellation cannot race interpreter shutdown and lose the confirmation.
+    A cancellation timeout retains a fatal child stack dump for diagnosing I/O,
+    signal-routing or interpreter-shutdown stalls.
     """
     reader, writer = os.pipe()
     command_reader, command_writer = os.pipe()
@@ -125,11 +131,14 @@ def deliver():
         assert time.monotonic() < deadline, 'main thread never entered blocked write'
         time.sleep(.001)
     signal.pthread_kill(waiting[0] if waiting[1] else main, signal.SIGINT)
-threading.Thread(target=deliver, daemon=True).start()
+    sys.stderr.write('delivered\n')
+    sys.stderr.flush()
+threading.Thread(target=deliver, daemon=False).start()
 '''
             program = program.replace('output = sys.stdout', routing + '\noutput = sys.stdout', 1)
         process = subprocess.Popen([sys.executable, '-u', '-c', program, operation, str(command_reader)],
-                                   pass_fds=(command_reader,), stdout=writer, stderr=subprocess.PIPE, text=True)
+                                   pass_fds=(command_reader,), stdout=writer, stderr=subprocess.PIPE, text=True,
+                                   env=dict(os.environ, PYTHONFAULTHANDLER='1'))
         os.close(writer)
         writer = -1
         assert process.stderr is not None
@@ -144,9 +153,18 @@ threading.Thread(target=deliver, daemon=True).start()
         assert process.stderr.readline() == 'blocked\n'
         if delivery == 'eligible-worker':
             os.write(command_writer, b'!')
+            assert select.select([process.stderr], [], [], CLI_PROCESS_TIMEOUT)[0], 'SIGINT was never delivered'
+            confirmation = process.stderr.readline()
+            assert confirmation == 'delivered\n', confirmation
         else:
             process.send_signal(signal.SIGINT)
-        assert process.wait(timeout=5) == 130
+        try:
+            status = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.send_signal(signal.SIGABRT)
+            _output, diagnostic = process.communicate(timeout=5)
+            pytest.fail('CLI did not finish cancellation within five seconds:\n' + diagnostic)
+        assert status == 130
         assert not process.stderr.read()
     finally:
         if process is not None:

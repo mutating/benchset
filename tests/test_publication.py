@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import stat
 import subprocess
@@ -10,7 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import Iterator, List, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -281,3 +282,49 @@ def test_generated_publication_lock_remains_usable_by_an_authorized_other_writer
         _assert_generation(package, 'B')
         assert lock.stat().st_ino == os.fstat(identity.fileno()).st_ino == generated.st_ino
     assert not installed.stat().st_mode & stat.S_IWUSR
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX publication lock permissions')
+@pytest.mark.parametrize('alias', ['symlink', 'hardlink', 'dangling', 'late-symlink', 'late-dangling'])
+def test_publication_lock_does_not_change_permissions_through_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias: str,
+) -> None:
+    """An aliased lock path must never create or make an unrelated file writable.
+
+    Install the late symlink just as the path is opened to exercise validation
+    of the opened file even if a pre-open pathname check succeeded.
+    """
+    from scripts.cargo import publish  # noqa: PLC0415
+
+    package = tmp_path / 'package'
+    package.mkdir()
+    compiled = _compiled(tmp_path, 'new')
+    victim = tmp_path / 'private'
+    dangling = alias.endswith('dangling')
+    if not dangling:
+        victim.write_bytes(b'private contents')
+        victim.chmod(0o600)
+    lock = package / '.benchset.publish.lock'
+    if alias == 'hardlink':
+        os.link(victim, lock)
+    elif alias.startswith('late-'):
+        original = builtins.open
+
+        def redirected(path: Path, *args: Any, **options: Any) -> Any:
+            if path == lock and not path.is_symlink():
+                path.symlink_to(victim)
+            return original(path, *args, **options)
+
+        monkeypatch.setattr(builtins, 'open', redirected)
+    else:
+        lock.symlink_to(victim)
+
+    expected_error = FileNotFoundError if alias == 'late-dangling' else OSError
+    with pytest.raises(expected_error):
+        publish(package, compiled, b'new metadata')
+    assert not (package / '_metadata.json').exists()
+    if dangling:
+        assert not victim.exists()
+    else:
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+        assert victim.read_bytes() == b'private contents'

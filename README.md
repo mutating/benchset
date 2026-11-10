@@ -245,7 +245,25 @@ or separately linked copies of the library can still compete for CPU time.
 
 With Python's default SIGINT handler, Ctrl+C during a main-thread call cancels
 the native work and raises `KeyboardInterrupt` after cleanup. Custom signal
-handlers are preserved.
+handlers are preserved. During the first native load, the first deferred
+SIGINT goes to the original Python handler, and any later deferred SIGINT
+uses the handler active at delivery.
+
+On Linux and macOS, the loader preserves the Unix `SA_RESTART` flag across
+temporary handler changes. An audit hook that denies access to `sigaction`
+can prevent this. A simultaneous change to the SIGINT disposition between
+the native snapshot and Python's handler installation can also reset the flag.
+Concurrent changes during native restoration can cause an interrupt in that
+window to miss its intended delivery. The loader reconciles policy changes
+observed after restoration with the OS.
+During snapshot initialization, a `PermissionError` is treated as an audit
+refusal unless the traceback identifies a Python signal or tracing callback. A handler that
+changes its signal arguments or a restriction on traceback inspection can
+prevent that identification.
+
+Source-build publication preserves recognizable signal, audit and tracing
+vetoes. Global I/O replacements that imitate those callback argument and
+event protocols can also be treated as host callbacks.
 
 ## What one iteration does
 
@@ -442,7 +460,7 @@ pinned release toolchain described under [Publishing](#publishing).
 
 ```toml
 [dependencies]
-benchset = "0.0.8"
+benchset = "0.0.9"
 # For changes from a local source checkout, use:
 # benchset = { path = "../benchset" }
 ```
@@ -608,7 +626,7 @@ the same repository. Rust is not required by the consumer.
 For a Swift manifest, add:
 
 ```swift
-.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.8"))
+.package(url: "https://github.com/mutating/benchset.git", .exact("0.0.9"))
 ```
 
 Add `.product(name: "Benchset", package: "benchset")` to your target's

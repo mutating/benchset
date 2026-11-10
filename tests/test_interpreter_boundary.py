@@ -29,7 +29,11 @@ loads = []
 if mock:
     path = root / 'benchset/_native' / ('benchset.dll' if sys.platform == 'win32' else 'libbenchset.dylib' if sys.platform == 'darwin' else 'libbenchset.so')
     library = ctypes.CDLL(str(path))
+    process = ctypes.CDLL(None) if sys.platform != 'win32' else None
     def factory(name, **kwargs):
+        if name is None:
+            assert process is not None and not kwargs
+            return process
         assert str(path) == name and not kwargs
         loads.append(name)
         return library
@@ -97,7 +101,8 @@ def test_public_api_without_cpython_api(implementation: str) -> None:
 
     Real PyPy characterizes the supported alternative interpreter. A CPython
     capability mock additionally exercises these branches during ordinary
-    coverage runs, including the standard loader for opaque handles. The child
+    coverage runs, including the standard loader for opaque handles and the
+    process handle used to read native signal flags on Unix. The child
     checks subclass conversion, fresh log reads, original errors and strings.
     """
     root = Path(__file__).resolve().parents[1]

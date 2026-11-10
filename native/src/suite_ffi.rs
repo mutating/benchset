@@ -30,7 +30,7 @@ struct StoredSuite {
     reasons: Vec<CString>,
 }
 
-// Views contain only immutable global calibration pointers. The vectors and
+// SAFETY: Views contain only immutable global calibration pointers. The vectors and
 // their values are owned by this record and accessed under the handle's mutex.
 unsafe impl Send for StoredSuite {}
 
@@ -52,33 +52,6 @@ pub extern "C" fn benchset_suite_create() -> *mut SuiteHandle {
     .unwrap_or(ptr::null_mut())
 }
 
-struct CallbackContext {
-    benchmark: Benchmark,
-    callback: SuiteCallback,
-    user: *mut c_void,
-}
-
-unsafe extern "C" fn progress_callback(progress: *const CProgress, user: *mut c_void) {
-    let context = &*(user as *const CallbackContext);
-    if let Some(callback) = context.callback {
-        let progress = &*progress;
-        callback(
-            &CSuiteProgress {
-                benchmark: context.benchmark as u32,
-                progress: CProgress {
-                    phase: progress.phase,
-                    workers: progress.workers,
-                    fraction: progress.fraction,
-                    phase_elapsed_seconds: progress.phase_elapsed_seconds,
-                    phase_duration_seconds: progress.phase_duration_seconds,
-                    iterations: progress.iterations,
-                },
-            },
-            context.user,
-        );
-    }
-}
-
 /// Config.benchmark is ignored; all other config validation is shared with run.
 #[no_mangle]
 pub unsafe extern "C" fn benchset_run_all(
@@ -87,7 +60,7 @@ pub unsafe extern "C" fn benchset_run_all(
     callback: SuiteCallback,
     user: *mut c_void,
 ) -> u32 {
-    benchset_run_all_observed(handle, config, callback, None, user)
+    unsafe { benchset_run_all_observed(handle, config, callback, None, user) }
 }
 
 /// Publish borrowed child snapshots before the next benchmark starts.
@@ -99,7 +72,7 @@ pub unsafe extern "C" fn benchset_run_all_observed(
     on_result: ResultCallback,
     user: *mut c_void,
 ) -> u32 {
-    benchset_run_all_configured(handle, config, callback, on_result, None, user)
+    unsafe { benchset_run_all_configured(handle, config, callback, on_result, None, user) }
 }
 
 /// Configure each borrowed child copy before validation, or abort without a child result.
@@ -112,18 +85,11 @@ pub unsafe extern "C" fn benchset_run_all_configured(
     on_config: ConfigCallback,
     user: *mut c_void,
 ) -> u32 {
-    execute_suite(
-        handle,
-        config,
-        callback,
-        on_result,
-        on_config,
-        user,
-        &mut |b, o, c, p| run(b, o, c, p),
-    )
+    let runner: &mut RustRunner<'_> = &mut |b, o, c, p| run(b, o, c, p);
+    unsafe { execute_suite_ffi(handle, config, callback, on_result, on_config, user, runner) }
 }
 
-unsafe fn execute_suite(
+unsafe fn execute_suite_ffi(
     handle: *mut SuiteHandle,
     config: *const Config,
     callback: SuiteCallback,
@@ -132,52 +98,72 @@ unsafe fn execute_suite(
     user: *mut c_void,
     runner: &mut RustRunner<'_>,
 ) -> u32 {
-    let Some(handle) = handle.as_ref() else {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
         return Status::Failed as u32;
     };
+    execute_suite(
+        handle,
+        || unsafe { read_config(config) },
+        |benchmark, progress| {
+            if let Some(callback) = callback {
+                let progress = CSuiteProgress {
+                    benchmark: benchmark as u32,
+                    progress: c_progress(progress),
+                };
+                unsafe { callback(&progress, user) };
+            }
+        },
+        |benchmark, child| {
+            on_result.map_or(true, |callback| {
+                (unsafe { callback(benchmark as u32, child, user) }) == 0
+            })
+        },
+        |benchmark, config| {
+            on_config.map_or(true, |callback| {
+                (unsafe { callback(benchmark as u32, config, user) }) != 0
+            })
+        },
+        runner,
+    )
+}
+
+fn execute_suite(
+    handle: &SuiteHandle,
+    mut snapshot: impl FnMut() -> ConfigSnapshot,
+    mut notify: impl FnMut(Benchmark, Progress),
+    mut observe: impl FnMut(Benchmark, &Handle) -> bool,
+    mut configure: impl FnMut(Benchmark, &mut Config) -> bool,
+    runner: &mut RustRunner<'_>,
+) -> u32 {
     if handle.used.swap(true, Ordering::AcqRel) {
         return Status::Failed as u32;
     }
     let mut reasons = Vec::new();
     let mut configuration_aborted = false;
     let result = run_suite_with(|benchmark| {
-        // Inspect the fixed prefix before copying the whole config, just as run does.
-        let mut copied;
-        let config = if !config.is_null()
-            && ptr::addr_of!((*config).abi_version).read() == ABI_VERSION
-            && ptr::addr_of!((*config).struct_size).read() == std::mem::size_of::<Config>() as u32
-        {
-            copied = config.read();
-            if on_config.is_some_and(|callback| callback(benchmark as u32, &mut copied, user) == 0)
-            {
-                configuration_aborted = true;
-                return None;
+        let config = match snapshot() {
+            Ok(mut config) => {
+                if !configure(benchmark, &mut config) {
+                    configuration_aborted = true;
+                    return None;
+                }
+                config.benchmark = benchmark as u32;
+                check_config_prefix(config.abi_version, || config.struct_size).map(|()| config)
             }
-            copied.benchmark = benchmark as u32;
-            &copied
-        } else {
-            config
+            invalid => invalid,
         };
-        let mut current = Handle {
+        let current = Handle {
             cancellation: handle.cancellation.clone(),
             used: AtomicBool::new(false),
             result: Mutex::new(None),
         };
-        let mut context = CallbackContext {
-            benchmark,
-            callback,
-            user,
-        };
         execute(
-            &mut current,
-            config,
-            Some(progress_callback),
-            (&mut context as *mut CallbackContext).cast(),
+            &current,
+            &mut || config,
+            &mut |progress| notify(benchmark, progress),
             runner,
         );
-        let proceed = on_result.map_or(true, |callback| {
-            callback(benchmark as u32, &current, user) == 0
-        });
+        let proceed = observe(benchmark, &current);
         let stored = current.result.into_inner().unwrap().unwrap();
         reasons.push(stored.reason);
         Some((stored.result, proceed))
@@ -201,7 +187,7 @@ unsafe fn execute_suite(
 
 #[no_mangle]
 pub unsafe extern "C" fn benchset_suite_cancel(handle: *mut SuiteHandle) {
-    if let Some(handle) = handle.as_ref() {
+    if let Some(handle) = unsafe { handle.as_ref() } {
         handle.cancellation.cancel();
     }
 }
@@ -215,19 +201,21 @@ pub unsafe extern "C" fn benchset_suite_result(
     if handle.is_null() || out.is_null() || size as usize != std::mem::size_of::<CSuiteResult>() {
         return 0;
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     let Some(stored) = stored.as_ref() else {
         return 0;
     };
     let equivalent = stored.result.aggregated_scores.pi_equivalent;
-    out.write(CSuiteResult {
+    let value = CSuiteResult {
         results: stored.views.as_ptr(),
         result_count: stored.result.results.len() as u64,
         aggregated_scores: CAggregatedScores {
             pi_equivalent: equivalent.unwrap_or(0.0),
             has_pi_equivalent: u32::from(equivalent.is_some()),
         },
-    });
+    };
+    unsafe { out.write(value) };
     1
 }
 
@@ -241,14 +229,16 @@ pub unsafe extern "C" fn benchset_suite_result_at(
     if handle.is_null() || out.is_null() || size as usize != std::mem::size_of::<CResultV3>() {
         return 0;
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     let Some(result) = stored
         .as_ref()
         .and_then(|s| s.result.results.get(index as usize))
     else {
         return 0;
     };
-    out.write(linked_result(result));
+    let value = linked_result(result);
+    unsafe { out.write(value) };
     1
 }
 
@@ -262,7 +252,8 @@ pub unsafe extern "C" fn benchset_suite_sample(
     if handle.is_null() || out.is_null() {
         return 0;
     }
-    let stored = (*handle).result.lock().unwrap_or_else(|e| e.into_inner());
+    let handle = unsafe { &*handle };
+    let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
     let Some(sample) = stored
         .as_ref()
         .and_then(|s| s.result.results.get(result_index as usize))
@@ -270,12 +261,13 @@ pub unsafe extern "C" fn benchset_suite_sample(
     else {
         return 0;
     };
-    out.write(CSample {
+    let value = CSample {
         elapsed_seconds: sample.elapsed_seconds,
         duration_seconds: sample.duration_seconds,
         iterations: sample.iterations,
         iterations_per_second: sample.iterations_per_second,
-    });
+    };
+    unsafe { out.write(value) };
     1
 }
 
@@ -284,7 +276,7 @@ pub unsafe extern "C" fn benchset_suite_reason(
     handle: *const SuiteHandle,
     index: u64,
 ) -> *const c_char {
-    let Some(handle) = handle.as_ref() else {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
         return ptr::null();
     };
     let stored = handle.result.lock().unwrap_or_else(|e| e.into_inner());
@@ -297,18 +289,22 @@ pub unsafe extern "C" fn benchset_suite_reason(
 #[no_mangle]
 pub unsafe extern "C" fn benchset_suite_free(handle: *mut SuiteHandle) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle));
+        let handle = unsafe { Box::from_raw(handle) };
+        drop(handle);
     }
 }
 
 #[cfg(test)]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[path = "suite_ffi_tests.rs"]
 mod tests;
 
 #[cfg(test)]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[path = "observed_suite_tests.rs"]
 mod observed_tests;
 
 #[cfg(test)]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[path = "configured_suite_tests.rs"]
 mod configured_tests;

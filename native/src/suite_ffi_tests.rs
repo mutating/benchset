@@ -208,24 +208,39 @@ fn actual_suite_getters_progress_cancellation_and_owned_results() {
         c.warmup_seconds = 0.025;
         c.measurement_seconds = 0.125;
         let mut events: Vec<CapturedProgress> = Vec::new();
-        let mut context = CallbackContext {
-            benchmark: Benchmark::MultiCore,
-            callback: Some(capture_progress),
-            user: (&mut events as *mut Vec<CapturedProgress>).cast(),
-        };
-        let progress = CProgress {
-            phase: 5,
-            workers: u32::MAX,
-            fraction: 0.12345678901234567,
-            phase_elapsed_seconds: 1.2345678901234567,
-            phase_duration_seconds: 2.345678901234567,
-            iterations: u64::MAX,
-        };
-        progress_callback(&progress, (&mut context as *mut CallbackContext).cast());
+        for callback in [Some(capture_progress as unsafe extern "C" fn(_, _)), None] {
+            let probe = Suite(benchset_suite_create());
+            assert_eq!(
+                execute_suite_ffi(
+                    probe.0,
+                    &c,
+                    callback,
+                    None,
+                    None,
+                    ptr::addr_of_mut!(events).cast(),
+                    &mut |benchmark, options, _, notify| {
+                        notify(Progress {
+                            phase: Phase::Failed,
+                            workers: u32::MAX,
+                            fraction: 0.12345678901234567,
+                            phase_elapsed_seconds: 1.2345678901234567,
+                            phase_duration_seconds: 2.345678901234567,
+                            iterations: u64::MAX,
+                        });
+                        BenchmarkResult::failed(benchmark, options, "test fixture".into())
+                    }
+                ),
+                Status::Failed as u32
+            );
+            assert_eq!(
+                CStr::from_ptr(benchset_suite_reason(probe.0, 0)).to_bytes(),
+                b"test fixture"
+            );
+        }
         assert_eq!(
             events,
             vec![(
-                2,
+                1,
                 (
                     5,
                     u32::MAX,
@@ -237,9 +252,6 @@ fn actual_suite_getters_progress_cancellation_and_owned_results() {
                 caller
             )]
         );
-        context.callback = None;
-        progress_callback(&progress, (&mut context as *mut CallbackContext).cast());
-        assert_eq!(events.len(), 1);
         events.clear();
         assert_eq!(
             benchset_run_all(

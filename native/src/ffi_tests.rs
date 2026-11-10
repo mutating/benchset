@@ -363,7 +363,7 @@ fn controlled_callback_preserves_every_progress_field() {
             cancel: false,
         };
         assert_eq!(
-            execute(
+            execute_ffi(
                 h.0,
                 &config(),
                 Some(callback),
@@ -510,6 +510,8 @@ fn live_callbacks_results_samples_precancel_and_single_use() {
     }
 }
 
+/// A panicking runner still publishes the selected benchmark and the original
+/// duration bits, even when the result lock needs poison recovery.
 #[test]
 fn panic_boundary_create_and_poison_recovery() {
     assert!(create_handle(&mut || panic!("constructor fault")).is_null());
@@ -520,10 +522,16 @@ fn panic_boundary_create_and_poison_recovery() {
             panic!("poison");
         }));
         assert!(poisoned.is_err());
+        let config = Config {
+            benchmark: Benchmark::MultiCore as u32,
+            warmup_seconds: -0.0,
+            measurement_seconds: 0.12345678901234567,
+            ..config()
+        };
         assert_eq!(
-            execute(
+            execute_ffi(
                 h.0,
-                &config(),
+                &config,
                 None,
                 ptr::null_mut(),
                 &mut |_, _, _, _| panic!("runner fault")
@@ -531,7 +539,17 @@ fn panic_boundary_create_and_poison_recovery() {
             2
         );
         assert_eq!(reason(h.0), "native benchmark panicked");
-        assert_eq!(result(h.0).status, 2);
+        let result = result(h.0);
+        assert_eq!(result.status, 2);
+        assert_eq!(result.benchmark, config.benchmark);
+        assert_eq!(
+            result.warmup_seconds.to_bits(),
+            config.warmup_seconds.to_bits()
+        );
+        assert_eq!(
+            result.measurement_seconds.to_bits(),
+            config.measurement_seconds.to_bits()
+        );
         assert_eq!(benchset_sample(h.0, 0, ptr::null_mut()), 0);
         let mut out = MaybeUninit::uninit();
         assert_eq!(benchset_sample(h.0, 0, out.as_mut_ptr()), 0);
@@ -545,7 +563,7 @@ fn complete_result_mapping_unicode_nul_and_large_unsigned_fields() {
             for variation in [None, Some(0.0), Some(12.345678901234567)] {
                 let h = Owned::new();
                 assert_eq!(
-                    execute(
+                    execute_ffi(
                         h.0,
                         &config(),
                         None,

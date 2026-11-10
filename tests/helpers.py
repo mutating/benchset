@@ -1,5 +1,8 @@
 """Shared checks for result metadata and reusable native runners."""
 
+import subprocess
+import sys
+from functools import lru_cache
 from typing import Callable, List, Optional
 
 import pytest
@@ -15,6 +18,30 @@ from benchset import (
     ReferenceRun,
     SuiteResult,
 )
+
+
+@lru_cache(maxsize=1)
+def frame_code_audit_supported() -> bool:
+    """Probe the interpreter's real f_code audit event independently of benchset.
+
+    A child contains the permanent audit hook; caching shares the capability
+    result across event-specific tests without relying on patch-version guesses.
+    """
+    source = """import sys
+frame = sys._getframe()
+events = []
+def audit(event, args):
+    if event == 'object.__getattr__' and args[0] is frame and args[1] == 'f_code':
+        events.append(event)
+sys.addaudithook(audit)
+frame.f_code
+print(int(bool(events)))
+"""
+    result = subprocess.run([sys.executable, '-I', '-c', source],
+                            capture_output=True, text=True, check=True, timeout=10)
+    output = result.stdout.strip()
+    assert output in ('0', '1'), result.stdout + result.stderr
+    return output == '1'
 
 
 def mock_suite(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -10,9 +10,26 @@ from os.path import abspath
 from pathlib import Path
 from threading import current_thread, main_thread
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Callable, List, NoReturn, Optional, Tuple, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    List,
+    Optional,
+    Tuple,
+    cast,
+)
 
 from benchset._metadata import DATA, canonical_name
+from benchset._signal_state import (
+    _direct_error,
+    _get_signal,
+    _native_sigaction,
+    _raise_original as _raise_original,  # noqa: PLC0414 — Shared with the host adapters.
+    _restore_sigint,
+    _set_signal,
+    _SignalHandler,
+)
 from benchset.models import (
     AggregatedScores,
     BenchmarkResult,
@@ -87,31 +104,49 @@ def _load_library(path: str) -> _CDLL:
     handler = signal.getsignal(signal.SIGINT)
     if current_thread() is not main_thread() or not callable(handler):
         return _shared_library(path)
+    native = _native_sigaction()
+    # Resolving the native symbol can run a caller's audit hook.
+    handler = _get_signal(signal.SIGINT)
+    if not callable(handler):
+        return _shared_library(path)
     pending: List[Tuple[int, Optional[FrameType]]] = []
+    deferring = True
 
     def defer(signum: int, frame: Optional[FrameType]) -> None:
-        pending.append((signum, frame))
+        if deferring:
+            pending.append((signum, frame))
+        elif callable(handler):
+            handler(signum, frame)
 
     try:
-        signal.signal(signal.SIGINT, defer)
-    except ValueError:  # Subinterpreters cannot install or receive Python signal handlers.
-        return _shared_library(path)
-    try:
+        try:
+            previous = _set_signal(signal.SIGINT, defer, native)
+            if previous is not None:
+                handler = previous
+        except ValueError as error:
+            if (not _direct_error(error, _set_signal) or _get_signal(signal.SIGINT) is defer or error.args not in (
+                ('signal only works in main thread',),
+                ('signal only works in main thread of the main interpreter',),
+                ('signal only works in main thread or with __pypy__.thread.enable_signals()',),
+            )):
+                raise
         return _shared_library(path)
     finally:
         try:
-            signal.signal(signal.SIGINT, handler)
+            _restore_sigint(defer, handler, native, _set_signal)
+            callback: Optional[_SignalHandler] = handler
             while pending:
                 arguments = pending.pop(0)
                 try:
-                    callback = signal.getsignal(signal.SIGINT)
                     if callable(callback):
                         callback(*arguments)
                     elif callback != signal.SIG_IGN:
                         signal.raise_signal(signal.SIGINT)
+                    callback = _get_signal(signal.SIGINT)
                 finally:
                     del arguments
         finally:
+            deferring = False
             pending.clear()  # Frames can refer back to this queue, even with cyclic GC disabled.
 
 
@@ -132,17 +167,6 @@ class _Functions:
             cast(Any, function)._library = self._library
         setattr(self, name, function)
         return function
-
-
-def _raise_original(error: BaseException) -> NoReturn:
-    """Preserve host context without retaining the exception in its own traceback."""
-    descriptor = BaseException.__dict__['__context__']
-    context = descriptor.__get__(error)
-    try:
-        raise error
-    finally:
-        descriptor.__set__(error, context)
-        del error
 
 
 class Config(ctypes.Structure):

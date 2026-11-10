@@ -18,7 +18,7 @@ from setuptools.command.develop import develop  # type: ignore[import-untyped]
 from wheel.bdist_wheel import bdist_wheel  # type: ignore[import-untyped]
 from wheel.wheelfile import WheelFile  # type: ignore[import-untyped]
 
-from scripts import version
+from scripts import cargo, version
 
 
 @pytest.fixture
@@ -40,6 +40,8 @@ def setup_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, A
     namespace['distribution'] = distributions[0]
     globals_ = namespace['BuildNative'].run.__globals__
     monkeypatch.setitem(globals_, 'ROOT', tmp_path)
+    # Target-platform simulations must retain the real host's signal support.
+    monkeypatch.setattr(cargo._signal_support(), 'sys', SimpleNamespace(platform=namespace['sys'].platform))
     return namespace
 
 
@@ -127,7 +129,8 @@ def test_native_build_installs_fresh_target_binary_in_wheel_or_editable_package(
         metadata = compiled.parent / 'reported-build-script-output/metadata.json'
         metadata.parent.mkdir(parents=True, exist_ok=True)
         metadata.write_text('{"fresh": true}\n')
-        message = {'reason': 'build-script-executed', 'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(metadata).hex()]]}
+        message = {'reason': 'build-script-executed', 'out_dir': str(metadata.parent),
+                   'env': [['BENCHSET_METADATA_PATH_HEX', os.fsencode(metadata).hex()]]}
         return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(message) + '\n')
 
     monkeypatch.setattr(subprocess, 'run', compile_)
